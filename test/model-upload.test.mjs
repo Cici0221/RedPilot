@@ -34,7 +34,7 @@ async function fixture(t, { renderRunner } = {}) {
   const runtime = path.join(directory, 'runtime'), source = path.join(directory, 'source'); await mkdir(source);
   const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
   await configureAuth({ directory: runtime, ...credentials });
-  let app = await createApp({ root, directory: runtime, env: {}, renderRunner });
+  let app = await createApp({ linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory: runtime, env: {}, renderRunner });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let base = `http://127.0.0.1:${app.server.address().port}`, cookie;
   async function login() {
@@ -49,7 +49,7 @@ async function fixture(t, { renderRunner } = {}) {
   return {
     runtime, source, get store() { return app.store; },
     async reopen() {
-      await app.close(); app = await createApp({ root, directory: runtime, env: {}, renderRunner });
+      await app.close(); app = await createApp({ linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory: runtime, env: {}, renderRunner });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
       base = `http://127.0.0.1:${app.server.address().port}`; await login();
     },

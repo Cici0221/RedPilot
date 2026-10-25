@@ -31,7 +31,7 @@ async function fixture(t, { env = imageEnv, fetcher = async () => response(), be
   const directory = await mkdtemp(path.join(os.tmpdir(), 'redpilot-image-jobs-'));
   const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
   await configureAuth({ directory, ...credentials });
-  let app = await createApp({ root, directory, env, fetcher });
+  let app = await createApp({ linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env, fetcher });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let base = `http://127.0.0.1:${app.server.address().port}`;
   let cookie;
@@ -44,7 +44,7 @@ async function fixture(t, { env = imageEnv, fetcher = async () => response(), be
   return {
     get store() { return app.store; }, tick: date => app.tick(date),
     async reopen() {
-      await app.close(); app = await createApp({ root, directory, env, fetcher });
+      await app.close(); app = await createApp({ linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env, fetcher });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
       base = `http://127.0.0.1:${app.server.address().port}`; await login();
     },

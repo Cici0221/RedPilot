@@ -10,6 +10,7 @@ import { createStore } from './store.mjs';
 import { createAuth } from './auth.mjs';
 import { imageProviderStatus, validateImageRequest, generateImage } from './image-workbench.mjs';
 import { receiveModelUpload, saveModelUpload, cleanModelUpload } from './model-uploads.mjs';
+import { inspirationUrl, supportedPageUrl, readReferenceLink } from './link-reader.mjs';
 import { id, now, InputError, str, lines, sourceUrl, noteKey, validateProduct, validateDraft, contentMode, checks, templateDraft, dateParts, dailyKey } from './content.mjs';
 import { aiReady, analyze, generate, imagesFor } from './ai.mjs';
 import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError } from './product-assets.mjs';
@@ -36,16 +37,21 @@ function validateFile(f) {
   else throw new InputError('仅支持 PNG、JPEG 和 WebP 图片');
   return {name,buf,ext,hash:createHash('sha256').update(buf).digest('hex')};
 }
-export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,authClock}={}) {
+export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,authClock}={}) {
   const auth=await createAuth({directory,clock:authClock,secureCookies:env.REDPILOT_COOKIE_SECURE==='true'});
   const store=await createStore(root,directory,{legacyBridgeAccountId:env.REDPILOT_ACCOUNT_ID || ''});
   const bridgeReady=()=>Boolean(env.REDPILOT_PUBLISH_URL&&env.REDPILOT_PUBLISH_TOKEN);
   const capabilities=()=>({ai:aiReady(env),model:env.REDPILOT_AI_MODEL||null,publisher:bridgeReady(),textPublisher:bridgeReady()&&env.REDPILOT_PUBLISH_TEXT_ENABLED==='true',
     account:accountById(store.state).bridgeAccountId||null,
     accounts:Object.fromEntries(store.state.accounts.map(account=>[account.id,{publisher:bridgeReady()&&Boolean(account.bridgeAccountId)}])),
-    feishu:false,linkReader:false});
+    feishu:false,linkReader:true});
   // Persist a result-unknown state after restart; never automatically retry an interrupted write.
   await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];s.imageJobs ||= [];for(const j of s.imageJobs)if(['queued','generating'].includes(j.status)){j.status='failed';j.error='服务已重启，生成结果未知；未自动重试，请先核对图片服务记录';j.completedAt=now();}for(const d of s.drafts){d.contentMode ||= 'image';d.productAssetIds ||= [];if(d.contentMode==='text'){d.productAssetIds=[];d.slides=[];}}for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs){j.contentMode ||= s.drafts.find(d=>d.id===j.draftId)?.contentMode||'image';if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}}});
+  await store.mutate(s=>{for(const r of s.inspirations){
+    r.userFields ||= {title:!['未命名灵感','链接灵感'].includes(r.title),text:Boolean(r.text),tags:Boolean(r.tags?.length)};
+    r.manualAssets ||= [...(r.assets||[])];
+    if(['queued','reading'].includes(r.linkRead?.status))Object.assign(r.linkRead,{status:'failed',error:'服务已重启，请点击重读',readAt:now()});
+  }});
   async function makeDraft(s,referenceId,instruction='',mode='综合借鉴',method='auto',accountId=s.defaultAccountId,productAssetIds,draftMode='image') {
     contentMode(draftMode);
     const account=accountById(s,accountId);
@@ -100,7 +106,73 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     } catch {j.status='uncertain';j.error='发布器请求未完成或返回异常；为防止重复发布，不会自动重发';}
     store.event(s,'publish',`[${j.accountName}] ${j.status==='published'?'已核对发布':'待核对'}：${j.title}`);
   }
-  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),closing=false;
+  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),closing=false;
+  const readLink=linkReader||((request)=>readReferenceLink(request,env));
+  function queueLinkRead(s,reference) {
+    if(!reference.url)throw new InputError('这条收藏没有链接');
+    if(['queued','reading'].includes(reference.linkRead?.status))return false;
+    if(s.inspirations.filter(r=>['queued','reading'].includes(r.linkRead?.status)).length>=20)throw new InputError('读取任务较多，请稍后再试',409);
+    reference.linkRead={status:'queued',attemptId:id(),requestedAt:now(),missing:[]};return true;
+  }
+  function scheduleLinkRead(referenceId,attemptId) {
+    readerQueue=readerQueue.then(async()=>{
+      if(closing)return;
+      let request;
+      try {
+        request=await store.mutate(s=>{
+          const r=s.inspirations.find(r=>r.id===referenceId);
+          if(!r||r.linkRead?.attemptId!==attemptId||r.linkRead.status!=='queued')return null;
+          r.linkRead.status='reading';return {url:r.url};
+        });
+        if(!request)return;
+        const raw=supportedPageUrl(request.url)?await readLink(request):{status:'unavailable',missing:[]};
+        await store.mutate(async s=>{
+          const r=s.inspirations.find(r=>r.id===referenceId);
+          if(!r||r.linkRead?.attemptId!==attemptId)return;
+          const statuses=['ready','partial','needs_login','blocked','unavailable'];
+          if(!raw||!statuses.includes(raw.status))throw new InputError('读取器没有返回有效的网页内容');
+          const missing=lines(raw.missing||[],20).map(x=>x.slice(0,500));
+          if(!['ready','partial'].includes(raw.status)){
+            const errors={needs_login:'请在 Chrome 登录小红书后重读',blocked:'页面要求验证或暂时限制访问，请在 Chrome 处理后重读',unavailable:'页面暂时无法读取，请稍后重读'};
+            Object.assign(r.linkRead,{status:raw.status,missing,error:supportedPageUrl(request.url)?errors[raw.status]:'自动读取目前支持小红书笔记、账号及分享短链接',readAt:now()});return;
+          }
+          if(!['note','profile'].includes(raw.kind))throw new InputError('尚未找到主笔记或账号资料');
+          const title=str(raw.title||'',500).slice(0,160),text=str(raw.text||'',32000).slice(0,16000);
+          const tags=lines((raw.tags||[]).slice(0,10),10).map(x=>x.replace(/^#/,'').slice(0,80));
+          let author='';
+          if(typeof raw.author==='string')author=str(raw.author,500).slice(0,200);
+          else if(raw.author&&typeof raw.author==='object')author=str(raw.author.name||raw.author.nickname||'',500).slice(0,200);
+          const resolved=raw.resolvedUrl||raw.canonicalUrl||request.url;
+          if(!supportedPageUrl(resolved))throw new InputError('读取结果不是小红书页面');
+          const wanted=new URL(request.url).pathname.match(/\/(?:explore|discovery\/item|user\/profile)\/([a-f\d]{24})/i)?.[1];
+          const actual=new URL(resolved).pathname.match(/\/(?:explore|discovery\/item|user\/profile)\/([a-f\d]{24})/i)?.[1];
+          if(wanted&&wanted.toLowerCase()!==actual?.toLowerCase())throw new InputError('页面内容与收藏链接不匹配');
+          if(!Array.isArray(raw.images||[])||(raw.images||[]).length>9)throw new InputError('网页图片列表不正确');
+          const files=(raw.images||[]).map(validateFile);
+          if(files.reduce((n,f)=>n+f.buf.length,0)>16*1024*1024)throw new InputError('参考图片超过本次大小限制');
+          if(!title&&!text&&!files.length)throw new InputError('网页没有可保存的内容');
+          const assets=[];
+          for(const f of files){const url='/uploads/'+f.hash+'.'+f.ext;await writeFile(path.join(directory,'uploads',f.hash+'.'+f.ext),f.buf,{mode:0o600});if(!assets.includes(url))assets.push(url);}
+          const canonical=new URL(resolved);canonical.search='';canonical.hash='';
+          r.pageContent={kind:raw.kind,title,text,author,tags,assets,canonicalUrl:canonical.href,readAt:now(),missing};
+          if(!r.userFields.title&&title)r.title=title;
+          if(!r.userFields.text)r.text=text;
+          if(!r.userFields.tags)r.tags=tags;
+          r.author=author;r.canonicalUrl=canonical.href;
+          r.assets=[...new Set([...(r.manualAssets||[]),...assets])];
+          r.hashes=[...new Set(r.assets.map(src=>src.match(/\/([a-f\d]{64})\.(?:png|jpg|webp)$/)?.[1]).filter(Boolean))];
+          r.scope=raw.kind==='profile'?'账号主页可见资料与卡片摘要；不代表单篇笔记全文':'网页主笔记正文与产品参考图片；不包含评论与推荐流';
+          if(missing.length)r.scope+='；'+missing.join('；');
+          r.analysis=null;r.method=null;r.status=r.text||r.assets.length?'ready':'needs_source';
+          Object.assign(r.linkRead,{status:missing.length||raw.status==='partial'?'partial':'ready',missing,error:null,readAt:now()});
+          store.event(s,'reading',`已读取收藏：${r.title}`);
+        });
+      }catch(error){await store.mutate(s=>{
+        const r=s.inspirations.find(r=>r.id===referenceId);
+        if(r?.linkRead?.attemptId===attemptId)Object.assign(r.linkRead,{status:'failed',error:'链接读取未完成，请稍后重读',readAt:now()});
+      });}
+    }).catch(error=>console.error('Reader queue failed:',error.name));
+  }
   function scheduleImage(jobId) {
     imageQueue=imageQueue.then(async()=>{
       if(closing)return;
@@ -289,27 +361,29 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(req.method==='PUT'&&action==='settings'){const settings=saveAccountSettings(s,account.id,b);store.event(s,'settings',`[${account.name}] 每日设置已更新`);return settings;}
           }
           if(req.method==='POST'&&pathname==='/api/inspirations') {
-            const title=str(b.title||'未命名灵感',160,true),url=sourceUrl(b.url),note=str(b.note||'',2000),text=str(b.text||'',16000),tags=lines(b.tags||[],10);
-            if(!Array.isArray(b.files)||b.files.length>6)throw new InputError('每组最多 6 张截图');
-            const files=b.files.map(validateFile);if(files.reduce((n,f)=>n+f.buf.length,0)>16*1024*1024)throw new InputError('截图总大小不能超过 16MB');
+            const suppliedTitle=str(b.title||'',160),title=suppliedTitle||'未命名灵感',url=inspirationUrl(b.url),note=str(b.note||'',2000),text=str(b.text||'',16000),tags=lines(b.tags||[],10);
+            if(!Array.isArray(b.files??[])||(b.files||[]).length>6)throw new InputError('每组最多 6 张截图');
+            const files=(b.files||[]).map(validateFile);if(files.reduce((n,f)=>n+f.buf.length,0)>16*1024*1024)throw new InputError('截图总大小不能超过 16MB');
             if(!url&&!files.length&&!text)throw new InputError('请提供链接、截图或正文');
-            let existing=s.inspirations.find(r=>(url&&noteKey(r.url)===noteKey(url))||files.some(f=>r.hashes.includes(f.hash)));
+            let existing=s.inspirations.find(r=>(url&&(noteKey(r.url)===noteKey(url)||r.canonicalUrl&&noteKey(r.canonicalUrl)===noteKey(url)))||files.some(f=>r.hashes.includes(f.hash)));
             if(b.targetId)existing=requireItem(s.inspirations,b.targetId);
-            const r=existing||{id:id(),title,url,note,text,tags,assets:[],hashes:[],pool:true,status:'saved',uses:0,createdAt:now()};
-            if(new Set([...r.hashes,...files.map(f=>f.hash)]).size>6)throw new InputError('同一收藏最多保存 6 张截图');
-            let added=0;for(const f of files){if(r.hashes.includes(f.hash))continue;const filename=`${f.hash}.${f.ext}`;await writeFile(path.join(directory,'uploads',filename),f.buf,{mode:0o600});r.hashes.push(f.hash);r.assets.push('/uploads/'+filename);added++;}
+            const r=existing||{id:id(),title,url,note,text,tags,assets:[],manualAssets:[],hashes:[],userFields:{title:Boolean(suppliedTitle),text:Boolean(text),tags:Boolean(tags.length)},pool:true,status:'saved',uses:0,createdAt:now()};
+            if(new Set([...(r.manualAssets||[]),...files.map(f=>'/uploads/'+f.hash+'.'+f.ext)]).size>6)throw new InputError('同一收藏最多保存 6 张手动截图');
+            let added=0;for(const f of files){const filename=`${f.hash}.${f.ext}`,asset='/uploads/'+filename;if(!r.manualAssets.includes(asset))r.manualAssets.push(asset);if(r.hashes.includes(f.hash))continue;await writeFile(path.join(directory,'uploads',filename),f.buf,{mode:0o600});r.hashes.push(f.hash);r.assets.push(asset);added++;}
             const changed=added>0||Boolean(text&&text!==r.text)||Boolean(note&&note!==r.note);
-            if(existing){if(text)r.text=text;if(note)r.note=note;if(!r.url)r.url=url;r.tags=[...new Set([...r.tags,...tags])];}
+            if(existing){if(text){r.text=text;r.userFields.text=true;}if(note)r.note=note;if(!r.url)r.url=url;if(suppliedTitle){r.title=suppliedTitle;r.userFields.title=true;}if(tags.length){r.tags=[...new Set([...r.tags,...tags])].slice(0,10);r.userFields.tags=true;}}
             if(!existing||changed){r.status=r.assets.length||r.text?'ready':'needs_source';r.analysis=null;r.method=null;}
-            if(!existing||changed)r.scope=r.assets.length?'仅已上传截图与粘贴正文':r.text?'仅粘贴正文；链接未抓取':'仅保存链接；网页未读取';
+            if(!existing||changed)r.scope=r.pageContent?'网页资料与用户补充内容':r.assets.length?'用户上传截图与粘贴正文':r.text?'用户提供正文':'链接已保存，等待自动读取';
             if(!existing)s.inspirations.unshift(r);
+            if(r.url&&!r.pageContent&&!r.linkRead)queueLinkRead(s,r);
             store.event(s,'inspiration',`${existing?'合并收藏':'新增收藏'}：${r.title}`);return {item:r,merged:Boolean(existing)};
           }
-          let m=pathname.match(/^\/api\/inspirations\/([^/]+)(?:\/(analyze))?$/);
+          let m=pathname.match(/^\/api\/inspirations\/([^/]+)(?:\/(analyze|read-link))?$/);
           if(m){const r=requireItem(s.inspirations,m[1]);
             if(req.method==='DELETE'){s.inspirations=s.inspirations.filter(x=>x.id!==r.id);return {ok:true};}
-            if(req.method==='PUT'){if('pool'in b)r.pool=Boolean(b.pool);if('title'in b)r.title=str(b.title,160,true);if('tags'in b)r.tags=lines(b.tags,10);return r;}
-            if(req.method==='POST'&&m[2]){r.analysis=await analyze(env,r,await imagesFor(r,root,directory),s.product,fetcher);r.status='analyzed';r.method='ai';r.analyzedAt=now();store.event(s,'analysis',`完成参考分析：${r.title}`);return r;}
+            if(req.method==='PUT'){if('pool'in b)r.pool=Boolean(b.pool);if('title'in b){const value=str(b.title,160,true);if(value!==r.title)r.userFields.title=true;r.title=value;}if('tags'in b){const value=lines(b.tags,10);if(JSON.stringify(value)!==JSON.stringify(r.tags))r.userFields.tags=true;r.tags=value;}return r;}
+            if(req.method==='POST'&&m[2]==='read-link'){queueLinkRead(s,r);return r;}
+            if(req.method==='POST'&&m[2]==='analyze'){r.analysis=await analyze(env,r,await imagesFor(r,root,directory),s.product,fetcher);r.status='analyzed';r.method='ai';r.analyzedAt=now();store.event(s,'analysis',`完成参考分析：${r.title}`);return r;}
           }
           if(req.method==='POST'&&pathname==='/api/drafts'){return makeDraft(s,b.referenceId,str(b.instruction||'',2000),str(b.mode||'综合借鉴',80),b.method||'auto',b.accountId||s.defaultAccountId,b.productAssetIds,b.contentMode);}
           m=pathname.match(/^\/api\/drafts\/([^/]+)(?:\/(approve|schedule|duplicate))?$/);
@@ -328,7 +402,9 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(m[2]==='verify'){if(j.status!=='uncertain')throw new InputError('只有待核对任务可查询发布结果',409);await dispatch(s,j,true);return j;}
           }
           throw new InputError('接口不存在',404);
-        });if(req.method==='POST'&&/^\/api\/product-assets\/[^/]+\/render$/.test(pathname))scheduleRender(result.id);if(req.method==='POST'&&pathname==='/api/image-jobs')scheduleImage(result.id);return json(res,result);
+        });if(req.method==='POST'&&/^\/api\/product-assets\/[^/]+\/render$/.test(pathname))scheduleRender(result.id);if(req.method==='POST'&&pathname==='/api/image-jobs')scheduleImage(result.id);
+        const reading=result.item||result;if(req.method==='POST'&&reading.linkRead?.status==='queued'&&(pathname==='/api/inspirations'||/^\/api\/inspirations\/[^/]+\/read-link$/.test(pathname)))scheduleLinkRead(reading.id,reading.linkRead.attemptId);
+        return json(res,result);
       }
       if(req.method!=='GET'&&req.method!=='HEAD')throw new InputError('请求不支持',405);
       let filename;
@@ -340,7 +416,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
+  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,readerQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);
