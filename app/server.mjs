@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { createStore } from './store.mjs';
 import { createAuth } from './auth.mjs';
 import { imageProviderStatus, validateImageRequest, generateImage } from './image-workbench.mjs';
+import { receiveModelUpload, saveModelUpload, cleanModelUpload } from './model-uploads.mjs';
 import { id, now, InputError, str, lines, sourceUrl, noteKey, validateProduct, validateDraft, contentMode, checks, templateDraft, dateParts, dailyKey } from './content.mjs';
 import { aiReady, analyze, generate, imagesFor } from './ai.mjs';
 import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError } from './product-assets.mjs';
@@ -239,6 +240,21 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         }
         if(!['POST','PUT','DELETE'].includes(req.method))throw new InputError('接口不存在',404);
         if(req.headers.origin!==`http://${host}`)throw new InputError('请求来源不匹配，请刷新本地页面',403);
+        if(req.method==='POST'&&pathname==='/api/product-assets/upload-model') {
+          let upload,committed=false;
+          try {
+            upload=await receiveModelUpload(req,directory,url.searchParams.get('name'));
+            // The session may have expired or been revoked during a long upload.
+            if(!auth.session(req))throw new InputError('登录已失效，请重新登录后上传',401);
+            const result=await store.mutate(async s=>{
+              const item=await saveModelUpload(s,directory,upload);
+              store.event(s,'materials',`3D 模型已保存：${item.name}`);return publicAsset(item,s);
+            });
+            committed=true;return json(res,result);
+          } catch(error) {
+            res.shouldKeepAlive=false;req.resume();throw error;
+          } finally {if(upload)await cleanModelUpload(upload,directory,store.state,committed);}
+        }
         const b=await body(req);
         const result=await store.mutate(async s=>{
           if(req.method==='POST'&&pathname==='/api/image-jobs') {

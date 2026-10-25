@@ -261,7 +261,8 @@
       "单篇排期与每日调度",
       "发布桥调用与结果状态",
       "每账号独立图文与文字比例",
-      "图片裁切另存与OpenAI图片任务"
+      "图片裁切另存与OpenAI图片任务",
+      "模型二进制上传与已有本地模型引用"
     ],
     "not_connected": [
       "实际AI服务密钥与模型",
@@ -297,16 +298,36 @@
     "auth_status": "当前管理记录与发布映射，不代表账号已登录，真实会话由发布桥按账号隔离"
   },
   "product_asset_library": {
-    "storage": "图片/图标/PDF本机托管，3D模型仅链接一个源文件，真实材料不进GitHub",
+    "storage": "图片/图标/PDF和主动上传的3D模型本机托管；已有模型可继续使用本地源文件引用，不自动复制大文件；真实材料不进GitHub",
     "supported": [
       "PNG/JPEG/WebP",
       "SVG",
       "PDF",
-      "本地STEP模型"
+      "STEP/STP模型",
+      "STL/GLB/OBJ/BLEND模型",
+      "已有本地模型引用"
     ],
-    "preview": "图片/图标直接预览，PDF首页预览与原文提取，模型完成渲染后显示产品图",
+    "preview": "图片/图标直接预览，PDF首页预览与原文提取；STEP/STP渲染完成后显示产品图，其余上传模型仅保存与下载",
+    "model_upload": {
+      "endpoint": "POST /api/product-assets/upload-model?name=<filename>",
+      "transport": "已认证且同源的原始二进制流，临时文件校验后存入托管目录",
+      "max_bytes": 1073741824,
+      "formats": [
+        "STEP",
+        "STP",
+        "STL",
+        "GLB",
+        "OBJ",
+        "BLEND"
+      ],
+      "external_dependencies": "暂不接受GLTF上传或自动收集模型的外部依赖；未执行BLEND或其他模型内的脚本",
+      "deduplication": "按SHA-256去重；主动上传同摘要的已有本地引用时，保留素材ID与预览，转为托管并移除源路径依赖",
+      "original_files": "保留既有本地引用，不自动迁移或复制；上传不修改或删除用户原文件",
+      "backup": "托管模型随runtime备份；本地引用的原模型需另外保存并在迁移后重新关联"
+    },
     "rendering": {
       "engine": "CadQuery+VTK",
+      "inputs": "已上传或本地引用的STEP/STP；其他模型格式暂不直接渲染",
       "presets": [
         "studio",
         "front",
@@ -316,7 +337,7 @@
         1200,
         1600
       ],
-      "cache": "源摘要对应派生网格缓存，原始模型不复制",
+      "cache": "源摘要对应派生网格缓存，缓存不额外复制STEP原件",
       "output": "异步任务生成PNG并自动入库"
     },
     "generation": "草稿保存图片与图标ID；图文主图使用所选kind=image原件，图标仅作来源；文字稿不带自有图。",
