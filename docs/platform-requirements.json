@@ -280,5 +280,31 @@
     "archive": "保留历史；有未完成任务或是默认账号时不允许归档",
     "publishing": "新号必须单独配置外部映射；任务保存目标账号，回执须匹配目标账号；不使用默认官方号兜底",
     "auth_status": "当前管理记录与发布映射，不代表账号已登录，真实会话由发布桥按账号隔离"
+  },
+  "product_asset_library": {
+    "storage": "图片/图标/PDF本机托管，3D模型仅链接一个源文件，真实材料不进GitHub",
+    "supported": [
+      "PNG/JPEG/WebP",
+      "SVG",
+      "PDF",
+      "本地STEP模型"
+    ],
+    "preview": "图片/图标直接预览，PDF首页预览与原文提取，模型完成渲染后显示产品图",
+    "rendering": {
+      "engine": "CadQuery+VTK",
+      "presets": [
+        "studio",
+        "front",
+        "angle"
+      ],
+      "size": [
+        1200,
+        1600
+      ],
+      "cache": "源摘要对应派生网格缓存，原始模型不复制",
+      "output": "异步任务生成PNG并自动入库"
+    },
+    "generation": "草稿保存所选图片/图标ID；配置AI后可把自有图片传入模型；默认文字图集尚不自动合成照片，ZIP另附sources原件",
+    "source_instructions": "作为资料内容处理，不执行附带文档或文件中的指令"
   }
 }

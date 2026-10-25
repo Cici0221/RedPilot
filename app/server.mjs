@@ -1,4 +1,7 @@
 import http from 'node:http';
+import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { mkdir } from 'node:fs/promises';
 import { readFile, writeFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,15 +9,16 @@ import { createHash } from 'node:crypto';
 import { createStore } from './store.mjs';
 import { id, now, InputError, str, lines, sourceUrl, noteKey, validateProduct, validateDraft, checks, templateDraft, dateParts, dailyKey } from './content.mjs';
 import { aiReady, analyze, generate, imagesFor } from './ai.mjs';
+import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError } from './product-assets.mjs';
 import { accountById, createAccount, updateAccount, setDefaultAccount, archiveAccount, saveAccountSettings, syncDefaultSettings } from './accounts.mjs';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const MAX_BODY = 24*1024*1024;
+const MAX_BODY = 30*1024*1024;
 const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.ttf':'font/ttf'};
 function requireItem(array,key) { const item = array.find(x=>x.id===key); if(!item) throw new InputError('记录不存在',404); return item; }
 function json(res, data, status=200) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}); res.end(JSON.stringify(data)); }
 async function body(req) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new InputError('需要 JSON 请求',415);
-  const chunks=[];let size=0; for await(const c of req) {size+=c.length;if(size>MAX_BODY)throw new InputError('上传总大小不能超过 16MB',413);chunks.push(c);}
+  const chunks=[];let size=0; for await(const c of req) {size+=c.length;if(size>MAX_BODY)throw new InputError('请求体不能超过 30MB',413);chunks.push(c);}
   try { const parsed=JSON.parse(Buffer.concat(chunks).toString()); if(!parsed || Array.isArray(parsed) || typeof parsed!=='object') throw 0; return parsed; } catch { throw new InputError('JSON 格式不正确'); }
 }
 function validateFile(f) {
@@ -28,7 +32,7 @@ function validateFile(f) {
   else throw new InputError('仅支持 PNG、JPEG 和 WebP 图片');
   return {name,buf,ext,hash:createHash('sha256').update(buf).digest('hex')};
 }
-export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch}={}) {
+export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner}={}) {
   const store=await createStore(root,directory,{legacyBridgeAccountId:env.REDPILOT_ACCOUNT_ID || ''});
   const bridgeReady=()=>Boolean(env.REDPILOT_PUBLISH_URL&&env.REDPILOT_PUBLISH_TOKEN);
   const capabilities=()=>({ai:aiReady(env),model:env.REDPILOT_AI_MODEL||null,publisher:bridgeReady(),
@@ -36,15 +40,17 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     accounts:Object.fromEntries(store.state.accounts.map(account=>[account.id,{publisher:bridgeReady()&&Boolean(account.bridgeAccountId)}])),
     feishu:false,linkReader:false});
   // Persist a result-unknown state after restart; never automatically retry an interrupted write.
-  await store.mutate(s=>{for(const j of s.jobs)if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}});
-  async function makeDraft(s,referenceId,instruction='',mode='综合借鉴',method='auto',accountId=s.defaultAccountId) {
+  await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];for(const d of s.drafts)d.productAssetIds ||= [];for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs)if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}});
+  async function makeDraft(s,referenceId,instruction='',mode='综合借鉴',method='auto',accountId=s.defaultAccountId,productAssetIds) {
     const account=accountById(s,accountId);
     const ref=referenceId?requireItem(s.inspirations,referenceId):null;
     const useAI=method!=='template'&&aiReady(env);
-    const accountInstruction=`账号：${account.name}。账号类型：${account.type==='official'?'官方':'普通'}。账号定位与备注：${account.notes || '无'}。本次要求：${instruction}`;
-    const data=useAI?await generate(env,s.product,ref,accountInstruction,mode,ref?await imagesFor(ref,root,directory):[],fetcher):templateDraft(s.product,ref,instruction);
+    const selected=selectedProductAssets(s,productAssetIds ?? s.productAssets.filter(a=>a.kind==='image').slice(-2).map(a=>a.id));
+    const materialCatalog=selected.map(a=>({id:a.id,name:a.name,kind:a.kind,description:a.description}));
+    const accountInstruction=`账号：${account.name}。账号类型：${account.type==='official'?'官方':'普通'}。账号定位与备注：${account.notes || '无'}。本次要求：${instruction}。可用自有产品素材：${JSON.stringify(materialCatalog)}。产品素材仅用于外观和品牌参考，不作为功能实测依据。`;
+    const data=useAI?await generate(env,s.product,ref,accountInstruction,mode,[...(ref?await imagesFor(ref,root,directory):[]),...await productVisionImages(selected,directory)],fetcher):templateDraft(s.product,ref,instruction);
     if(method==='ai'&&!useAI)throw new InputError('AI 未配置，请选择本地事实模板',409);
-    const draft={...data,id:id(),accountId:account.id,referenceIds:ref?[ref.id]:[],instruction,mode,productVersion:s.product.version,status:'draft',createdAt:now(),updatedAt:now(),history:[],revision:1};
+    const draft={...data,id:id(),productAssetIds:selected.map(a=>a.id),accountId:account.id,referenceIds:ref?[ref.id]:[],instruction,mode,productVersion:s.product.version,status:'draft',createdAt:now(),updatedAt:now(),history:[],revision:1};
     s.drafts.unshift(draft);if(ref)ref.uses++;
     store.event(s,'generation',`[${account.name}] ${draft.method==='ai'?'AI':'本地模板'}生成：${draft.title}`);return draft;
   }
@@ -76,7 +82,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     try {
       const res=await fetcher(env.REDPILOT_PUBLISH_URL,{method:'POST',redirect:'error',signal:AbortSignal.timeout(60000),headers:{'Content-Type':'application/json',Authorization:`Bearer ${env.REDPILOT_PUBLISH_TOKEN}`,'Idempotency-Key':j.idempotencyKey},
         body:JSON.stringify({action:verify?'verify':'publish',idempotencyKey:j.idempotencyKey,accountId:j.account,jobId:j.id,
-          post:{title:d.title,body:d.body,tags:d.tags,slides:d.slides,brand:s.product.brand,product:s.product.name,design:'blue-white-v1'},noteUrl:j.noteUrl||null})});
+          post:{title:d.title,body:d.body,tags:d.tags,slides:d.slides,sourceAssets:await Promise.all(selectedProductAssets(s,d.productAssetIds||[]).map(async a=>({id:a.id,name:a.name,mime:a.mime,data:(await readFile(await readableAssetFile(a,directory))).toString('base64')}))),brand:s.product.brand,product:s.product.name,design:'blue-white-v1'},noteUrl:j.noteUrl||null})});
       if(!res.ok)throw new Error('bridge_error');
       const result=await res.json();
       const parsed=result.noteUrl?new URL(result.noteUrl):null;
@@ -86,6 +92,43 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     } catch {j.status='uncertain';j.error='发布器请求未完成或返回异常；为防止重复发布，不会自动重发';}
     store.event(s,'publish',`[${j.accountName}] ${j.status==='published'?'已核对发布':'待核对'}：${j.title}`);
   }
+  let renderQueue=Promise.resolve(),closing=false;
+  const render=renderRunner||((args)=>runProductRender(args,root,env));
+  function scheduleRender(jobId) {
+    renderQueue=renderQueue.then(async()=>{
+      if(closing)return;
+      let source,outputPath;
+      try {
+        const task=await store.mutate(s=>{
+          const job=requireItem(s.productRenders,jobId),asset=requireItem(s.productAssets,job.assetId);
+          job.status='running';job.startedAt=now();return {job:structuredClone(job),asset:structuredClone(asset)};
+        });
+        source=await readableAssetFile(task.asset,directory);
+        const outputDirectory=path.join(directory,'product-assets','renders');
+        await mkdir(outputDirectory,{recursive:true});
+        outputPath=path.join(outputDirectory,task.job.id+'.png');
+        await render({modelPath:source,outputPath,preset:task.job.preset,cacheDirectory:path.join(directory,'product-assets','render-cache')});
+        // Only the assigned output path may be registered; runner return values cannot read arbitrary files.
+        await store.mutate(async s=>{
+          const job=requireItem(s.productRenders,jobId),model=requireItem(s.productAssets,job.assetId);
+          const [image]=await importProductAssets(s,directory,[outputPath],'managed',[`${model.name} · ${job.preset} 产品图`]);
+          if(image.kind!=='image'||image.mime!=='image/png')throw new InputError('渲染器没有生成有效 PNG');
+          image.description='根据产品3D模型生成的几何渲染图，非实拍或功能验证画面';
+          image.metadata.modelAssetId=model.id;image.metadata.preset=job.preset;image.metadata.modelSha256=model.sha256;
+          job.status='completed';job.completedAt=now();job.imageAssetId=image.id;job.previewUrl=`/api/product-assets/${image.id}/file`;
+          model.previewAssetId=image.id;
+          store.event(s,'render',`产品图已生成：${model.name}`);
+        });
+      } catch(error) {
+        await store.mutate(s=>{
+          const job=requireItem(s.productRenders,jobId);job.status='failed';job.error=cleanRenderError(error,[source,outputPath,root,directory]);job.completedAt=now();
+          store.event(s,'render',`产品图生成失败：${job.error}`);
+        });
+      }
+    }).catch(error=>console.error('Render queue failed:',error.name));
+  }
+  const publicState=()=>({...store.state,productAssets:store.state.productAssets.map(a=>publicAsset(a,store.state)),
+    capabilities:capabilities(),draftChecks:Object.fromEntries(store.state.drafts.map(d=>[d.id,checks(d,store.state.product)]))});
   let ticking=false;
   async function tick(date=new Date()) {
     if(ticking)return;ticking=true;
@@ -117,12 +160,43 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       if(!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host))throw new InputError('仅允许本机访问',403);
       const url=new URL(req.url,`http://${host}`), pathname=decodeURIComponent(url.pathname);
       if(pathname.startsWith('/api/')) {
-        if(req.method==='GET'&&pathname==='/api/state')return json(res,{...store.state,capabilities:capabilities(),draftChecks:Object.fromEntries(store.state.drafts.map(d=>[d.id,checks(d,store.state.product)]))});
+        if(req.method==='GET'&&pathname==='/api/state')return json(res,publicState());
         if(req.method==='GET'&&pathname==='/api/health')return json(res,{ok:true});
+        const media=pathname.match(/^\/api\/product-assets\/([^/]+)\/(file|preview)$/);
+        if(media&&['GET','HEAD'].includes(req.method)) {
+          const asset=requireItem(store.state.productAssets,media[1]);
+          let filename,mime;
+          if(media[2]==='preview') {
+            if(asset.previewAssetId){const preview=requireItem(store.state.productAssets,asset.previewAssetId);filename=await readableAssetFile(preview,directory);mime=preview.mime;}
+            else if(asset.previewName&&/^[a-f\d-]+\.png$/.test(asset.previewName)){filename=path.join(directory,'product-assets','previews',asset.previewName);mime='image/png';}
+            else throw new InputError('此素材暂无预览',404);
+          } else {filename=await readableAssetFile(asset,directory);mime=asset.mime;}
+          const info=await stat(filename);
+          const download=media[2]==='file'&&(url.searchParams.has('download')||['model','brochure','icon'].includes(asset.kind));
+          res.writeHead(200,{'Content-Type':mime,'Content-Length':info.size,'Cache-Control':'no-cache',
+            'Content-Disposition':`${download?'attachment':'inline'}; filename*=UTF-8''${encodeURIComponent(asset.originalName)}`});
+          if(req.method==='HEAD')return res.end();
+          await pipeline(createReadStream(filename),res);return;
+        }
         if(!['POST','PUT','DELETE'].includes(req.method))throw new InputError('接口不存在',404);
         if(req.headers.origin!==`http://${host}`)throw new InputError('请求来源不匹配，请刷新本地页面',403);
         const b=await body(req);
         const result=await store.mutate(async s=>{
+          if(req.method==='POST'&&pathname==='/api/product-assets/import') {
+            const items=await importProductAssets(s,directory,b.paths,b.mode||'managed',Array.isArray(b.names)?b.names:[]);
+            store.event(s,'materials',`产品素材导入：${items.length} 项`);return {items:items.map(a=>publicAsset(a,s))};
+          }
+          if(req.method==='POST'&&pathname==='/api/product-assets/upload') {
+            const item=await uploadProductAsset(s,directory,b);store.event(s,'materials',`产品素材已保存：${item.name}`);return publicAsset(item,s);
+          }
+          const renderRoute=pathname.match(/^\/api\/product-assets\/([^/]+)\/render$/);
+          if(renderRoute&&req.method==='POST') {
+            const asset=requireItem(s.productAssets,renderRoute[1]);
+            if(!publicAsset(asset,s).renderable)throw new InputError('此素材不是可渲染的完整 STEP 模型');
+            if(!['studio','front','angle'].includes(b.preset))throw new InputError('渲染角度不正确');
+            if(s.productRenders.some(j=>j.assetId===asset.id&&['queued','running'].includes(j.status)))throw new InputError('该模型正在渲染，请等待完成',409);
+            const job={id:id(),assetId:asset.id,status:'queued',preset:b.preset,createdAt:now()};s.productRenders.unshift(job);return job;
+          }
           if(req.method==='PUT'&&pathname==='/api/product') {s.product=validateProduct(b);s.drafts.forEach(d=>{if(d.status!=='published')d.approved=false;});store.event(s,'product','产品资料已更新，未发布草稿需要重新核对');return s.product;}
           if(req.method==='PUT'&&pathname==='/api/settings') {const settings=saveAccountSettings(s,s.defaultAccountId,b);store.event(s,'settings','默认账号每日设置已更新');return settings;}
           if(req.method==='POST'&&pathname==='/api/accounts'){const account=createAccount(s,b);store.event(s,'account',`已添加账号：${account.name}`);return account;}
@@ -156,13 +230,13 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(req.method==='PUT'){if('pool'in b)r.pool=Boolean(b.pool);if('title'in b)r.title=str(b.title,160,true);if('tags'in b)r.tags=lines(b.tags,10);return r;}
             if(req.method==='POST'&&m[2]){r.analysis=await analyze(env,r,await imagesFor(r,root,directory),s.product,fetcher);r.status='analyzed';r.method='ai';r.analyzedAt=now();store.event(s,'analysis',`完成参考分析：${r.title}`);return r;}
           }
-          if(req.method==='POST'&&pathname==='/api/drafts'){return makeDraft(s,b.referenceId,str(b.instruction||'',2000),str(b.mode||'综合借鉴',80),b.method||'auto',b.accountId||s.defaultAccountId);}
+          if(req.method==='POST'&&pathname==='/api/drafts'){return makeDraft(s,b.referenceId,str(b.instruction||'',2000),str(b.mode||'综合借鉴',80),b.method||'auto',b.accountId||s.defaultAccountId,b.productAssetIds);}
           m=pathname.match(/^\/api\/drafts\/([^/]+)(?:\/(approve|schedule|duplicate))?$/);
           if(m){const d=requireItem(s.drafts,m[1]);
             if(m[2]==='duplicate'&&req.method==='POST'){const target=accountById(s,b.accountId||(accountById(s,d.accountId,true).archived?s.defaultAccountId:d.accountId));const copy={...structuredClone(d),accountId:target.id,id:id(),status:'draft',approved:false,history:[],revision:1,createdAt:now(),updatedAt:now()};s.drafts.unshift(copy);return copy;}
             if(s.jobs.some(j=>j.draftId===d.id&&!['cancelled','failed'].includes(j.status)))throw new InputError('请先取消排期；已发布或待核对的稿件可复制为新草稿',409);
             if(req.method==='DELETE'){s.drafts=s.drafts.filter(x=>x.id!==d.id);return {ok:true};}
-            if(req.method==='PUT'){const account=accountById(s,b.accountId||d.accountId);const data={...validateDraft(b),accountId:account.id};d.history.unshift({at:d.updatedAt,title:d.title,body:d.body,slides:d.slides,tags:d.tags});d.history=d.history.slice(0,20);Object.assign(d,data,{productVersion:s.product.version,approved:false,revision:d.revision+1,updatedAt:now()});return d;}
+            if(req.method==='PUT'){const account=accountById(s,b.accountId||d.accountId);const data={...validateDraft(b),productAssetIds:selectedProductAssets(s,b.productAssetIds??d.productAssetIds??[]).map(a=>a.id),accountId:account.id};d.history.unshift({at:d.updatedAt,title:d.title,body:d.body,slides:d.slides,tags:d.tags});d.history=d.history.slice(0,20);Object.assign(d,data,{productVersion:s.product.version,approved:false,revision:d.revision+1,updatedAt:now()});return d;}
             if(m[2]==='approve'&&req.method==='POST'){const issues=checks(d,s.product);if(issues.length)throw new InputError(issues.join('；'),409);d.approved=true;return d;}
             if(m[2]==='schedule'&&req.method==='POST'){const at=new Date(b.scheduledAt);if(!Number.isFinite(at.valueOf())||at<=new Date())throw new InputError('请选择未来的发布时间');return newJob(s,d,at.toISOString(),b.accountId||d.accountId);}
           }
@@ -173,7 +247,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(m[2]==='verify'){if(j.status!=='uncertain')throw new InputError('只有待核对任务可查询发布结果',409);await dispatch(s,j,true);return j;}
           }
           throw new InputError('接口不存在',404);
-        });return json(res,result);
+        });if(req.method==='POST'&&/^\/api\/product-assets\/[^/]+\/render$/.test(pathname))scheduleRender(result.id);return json(res,result);
       }
       if(req.method!=='GET'&&req.method!=='HEAD')throw new InputError('请求不支持',405);
       let filename;
@@ -185,7 +259,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-cache'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){await new Promise(resolve=>server.close(resolve));await store.close();}};
+  return {server,store,tick, async close(){closing=true;await renderQueue;await new Promise(resolve=>server.close(resolve));await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);

@@ -1,0 +1,4 @@
+# Optional CAD renderer. These versions were verified on the current workstation.
+cadquery==2.8.0
+vtk==9.6.2
+numpy>=2.2,<3

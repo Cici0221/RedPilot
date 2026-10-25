@@ -27,6 +27,7 @@ Content-Type: application/json
     "body": "正文",
     "tags": ["产品开发"],
     "slides": [{"headline": "页标题", "body": "本页文字"}],
+    "sourceAssets": [{"id": "素材UUID", "name": "产品图", "mime": "image/png", "data": "base64原始素材"}],
     "brand": "人类补丁",
     "product": "SimHelper",
     "design": "blue-white-v1"
@@ -34,6 +35,8 @@ Content-Type: application/json
   "noteUrl": null
 }
 ```
+
+`sourceAssets` 是用户为该草稿选中的自有图片/图标原件，可能包含真实3D渲染图；桥接服务需自行排版合成，不可将原图当作已经完成的图集。未选素材时为空数组。
 
 `slides` 是原创文字图集的分镜，**不是图片地址**。桥接服务必须将其渲染为真实图片后再提交平台；不可拿参考截图代替成稿。网页预览和 PNG 导出实现在 `public/app.js` 的 `coverSVG` / `png` 函数，尺寸 1200 × 1600。
 
