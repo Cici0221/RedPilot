@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "updated_on": "2026-10-25",
-  "project": "SimHelper 小红书运营平台",
+  "project": "RedPilot｜薯航",
+  "description": "小红书产品宣传账号运营平台，首个产品场景为 SimHelper AI 电话助理。",
   "implementation_status": "requirements_and_seed_data_only",
   "user_intent": "每天自动发帖；上传截图或保存链接到收藏库后，分析参考内容，按相近风格为公司产品生成新帖子。",
   "modules": [

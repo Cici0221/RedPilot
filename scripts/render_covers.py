@@ -135,7 +135,7 @@ def board(covers):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Generate RedBook original cover samples.')
+    parser = argparse.ArgumentParser(description='Generate RedPilot original cover samples.')
     parser.add_argument('--output-dir', type=Path, default=ROOT)
     parser.add_argument('--cjk-font', type=Path)
     parser.add_argument('--cjk-index', type=int, default=None)
