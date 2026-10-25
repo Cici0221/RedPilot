@@ -17,6 +17,8 @@ import { id, now, InputError, str, lines, sourceUrl, noteKey, validateProduct, v
 import { aiReady, analyze, generate, imagesFor, callAI } from './ai.mjs';
 import { fetchTrendBoards } from './trend-sources.mjs';
 import { initEditorial, editorialActive, normalizeBoards, rankedTrends, reportSettings, reportDate, addTopic, createDiscussion, queueReport, buildReport } from './editorial.mjs';
+import { readFeishuSources } from './feishu-reader.mjs';
+import { initFeishu, updateFeishuSettings, queueFeishuSync, feishuDue, finishFeishuSync, productForAI } from './feishu.mjs';
 import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError } from './product-assets.mjs';
 import { accountById, createAccount, updateAccount, setDefaultAccount, archiveAccount, saveAccountSettings, syncDefaultSettings } from './accounts.mjs';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -41,14 +43,14 @@ function validateFile(f) {
   else throw new InputError('仅支持 PNG、JPEG 和 WebP 图片');
   return {name,buf,ext,hash:createHash('sha256').update(buf).digest('hex')};
 }
-export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,creatorReader,trendReader,authClock}={}) {
+export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,creatorReader,trendReader,feishuReader,authClock}={}) {
   const auth=await createAuth({directory,clock:authClock,secureCookies:env.REDPILOT_COOKIE_SECURE==='true'});
   const store=await createStore(root,directory,{legacyBridgeAccountId:env.REDPILOT_ACCOUNT_ID || ''});
   const bridgeReady=()=>Boolean(env.REDPILOT_PUBLISH_URL&&env.REDPILOT_PUBLISH_TOKEN);
   const capabilities=()=>({ai:aiReady(env),model:env.REDPILOT_AI_MODEL||null,publisher:bridgeReady(),textPublisher:bridgeReady()&&env.REDPILOT_PUBLISH_TEXT_ENABLED==='true',
     account:accountById(store.state).bridgeAccountId||null,
     accounts:Object.fromEntries(store.state.accounts.map(account=>[account.id,{publisher:bridgeReady()&&Boolean(account.bridgeAccountId)}])),
-    feishu:false,linkReader:true});
+    feishu:true,linkReader:true});
   // Persist a result-unknown state after restart; never automatically retry an interrupted write.
   await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];s.imageJobs ||= [];for(const j of s.imageJobs)if(['queued','generating'].includes(j.status)){j.status='failed';j.error='服务已重启，生成结果未知；未自动重试，请先核对图片服务记录';j.completedAt=now();}for(const d of s.drafts){d.contentMode ||= 'image';d.productAssetIds ||= [];if(d.contentMode==='text'){d.productAssetIds=[];d.slides=[];}}for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs){j.contentMode ||= s.drafts.find(d=>d.id===j.draftId)?.contentMode||'image';if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}}});
   await store.mutate(s=>{for(const r of s.inspirations){
@@ -63,6 +65,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     for(const task of s.analysisTasks)if(activeTask(task)){task.status='failed';task.error='服务已重启，拆解结果未知；未自动重试';task.completedAt=now();}
   });
   await store.mutate(s=>initEditorial(s));
+  await store.mutate(s=>initFeishu(s));
   async function makeDraft(s,referenceId,instruction='',mode='综合借鉴',method='auto',accountId=s.defaultAccountId,productAssetIds,draftMode='image') {
     contentMode(draftMode);
     const account=accountById(s,accountId);
@@ -71,7 +74,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     const selected=draftMode==='text'?[]:selectedProductAssets(s,productAssetIds ?? s.productAssets.filter(a=>a.kind==='image').slice(-2).map(a=>a.id));
     const materialCatalog=selected.map(a=>({id:a.id,name:a.name,kind:a.kind,description:a.description}));
     const accountInstruction=`账号：${account.name}。账号类型：${account.type==='official'?'官方':'普通'}。账号定位与备注：${account.notes || '无'}。本次要求：${instruction}。可用自有产品素材：${JSON.stringify(materialCatalog)}。产品素材仅用于外观和品牌参考，不作为功能实测依据。`;
-    const data=useAI?await generate(env,s.product,ref,accountInstruction,mode,[...(ref?await imagesFor(ref,root,directory):[]),...await productVisionImages(selected,directory)],fetcher,draftMode):templateDraft(s.product,ref,instruction,draftMode);
+    const data=useAI?await generate(env,productForAI(s),ref,accountInstruction,mode,[...(ref?await imagesFor(ref,root,directory):[]),...await productVisionImages(selected,directory)],fetcher,draftMode):templateDraft(s.product,ref,instruction,draftMode);
     if(method==='ai'&&!useAI)throw new InputError('AI 未配置，请选择本地事实模板',409);
     const draft={...data,contentMode:draftMode,id:id(),productAssetIds:selected.map(a=>a.id),accountId:account.id,referenceIds:ref?[ref.id]:[],instruction,mode,productVersion:s.product.version,status:'draft',createdAt:now(),updatedAt:now(),history:[],revision:1};
     s.drafts.unshift(draft);if(ref)ref.uses++;
@@ -117,7 +120,20 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     } catch {j.status='uncertain';j.error='发布器请求未完成或返回异常；为防止重复发布，不会自动重发';}
     store.event(s,'publish',`[${j.accountName}] ${j.status==='published'?'已核对发布':'待核对'}：${j.title}`);
   }
-  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),creatorQueue=Promise.resolve(),analysisQueue=Promise.resolve(),trendQueue=Promise.resolve(),reportQueue=Promise.resolve(),closing=false;
+  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),creatorQueue=Promise.resolve(),analysisQueue=Promise.resolve(),trendQueue=Promise.resolve(),reportQueue=Promise.resolve(),feishuQueue=Promise.resolve(),closing=false;
+  const readFeishu=feishuReader||((request)=>readFeishuSources(request,env));
+  const queuedFeishu=new Set();
+  function pumpFeishu(){for(const job of store.state.feishuJobs.filter(j=>j.status==='queued'))scheduleFeishu(job.id);}
+  function scheduleFeishu(jobId){
+    if(queuedFeishu.has(jobId))return;queuedFeishu.add(jobId);
+    feishuQueue=feishuQueue.then(async()=>{
+      if(closing)return;
+      const request=await store.mutate(s=>{const job=requireItem(s.feishuJobs,jobId);if(job.status!=='queued')return null;job.status='running';job.startedAt=now();return {urls:[...job.sourceUrls]};});
+      if(!request)return;
+      let result;try{result=await readFeishu(request);}catch{result={status:'unavailable',documents:[],sources:[],error:'飞书读取未完成，请检查 Chrome 登录和文档权限'};}
+      await store.mutate(s=>{const job=requireItem(s.feishuJobs,jobId);finishFeishuSync(s,job,result);store.event(s,'feishu',`飞书同步：${job.documentCount||0} 篇可读，新增 ${job.added||0} 篇，更新 ${job.changed||0} 篇`);});
+    }).catch(error=>console.error('Feishu queue failed:',error.name)).finally(()=>queuedFeishu.delete(jobId));
+  }
   const readTrends=trendReader||(()=>fetchTrendBoards({},env));
   const trendPromises=new Map(),queuedReports=new Set();
   function queueTrends(s,reason='manual') {
@@ -196,7 +212,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           const key=fingerprint(r,s.product);
           if(r.analysis&&r.analysisFingerprint===key){Object.assign(task,{status:'completed',reused:true,completedAt:now()});return null;}
           task.status='running';task.startedAt=now();task.sourceFingerprint=key;
-          return {reference:structuredClone(r),product:structuredClone(s.product),key};
+          return {reference:structuredClone(r),product:structuredClone(productForAI(s)),key};
         });
         if(!request)return;
         const result=await analyze(env,request.reference,await imagesFor(request.reference,root,directory),request.product,fetcher);
@@ -428,6 +444,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   async function tick(date=new Date()) {
     if(ticking)return;ticking=true;
     try {await store.mutate(async s=>{
+      if(feishuDue(s,date))queueFeishuSync(s,'automatic',date);
       for(const c of s.creators.filter(c=>c.enabled&&!c.archived)){
         const p=dateParts(date,c.timezone),key=dailyKey(date,c.timezone);
         if(`${p.hour}:${p.minute}`>=c.time&&c.lastDailyKey!==key){c.lastDailyKey=key;queueCreatorSync(s,c.id,'daily');}
@@ -459,7 +476,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
       syncDefaultSettings(s);
       for(const j of s.jobs.filter(j=>j.status==='scheduled'&&new Date(j.scheduledAt)<=date))await dispatch(s,j);
-    });pumpCreatorSyncs();pumpAnalyses();pumpEditorial();} finally {ticking=false;}
+    });pumpCreatorSyncs();pumpAnalyses();pumpEditorial();pumpFeishu();} finally {ticking=false;}
   }
   const server=http.createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Frame-Options','DENY');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
@@ -531,7 +548,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(!aiReady(env)){chat.status='blocked';chat.lastError='AI 未配置，问题已保存';return {blocked:true,chat:structuredClone(chat)};}
             chat.status='waiting';chat.requestId=id();
             const materials=chat.sources.map(source=>({...source,...(source.kind==='reference'?{savedText:s.inspirations.find(r=>r.id===source.id)?.text?.slice(0,8000)||''}:{})}));
-            return {chat:structuredClone(chat),account:structuredClone(accountById(s,chat.accountId)),product:structuredClone(s.product),materials};
+            return {chat:structuredClone(chat),account:structuredClone(accountById(s,chat.accountId)),product:structuredClone(productForAI(s)),materials};
           });
           if(request.blocked)return json(res,request.chat);
           try {
@@ -546,6 +563,8 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           }catch(error){await store.mutate(s=>{const d=s.discussions.find(d=>d.id===request.chat.id);if(d&&d.requestId===request.chat.requestId){d.status='failed';d.lastError=error instanceof InputError?error.message:'AI 回复未完成，问题已保存';delete d.requestId;}});return json(res,{error:error instanceof InputError?error.message:'AI 回复未完成，问题已保存'},error.status||502);}
         }
         const result=await store.mutate(async s=>{
+          if(req.method==='PUT'&&pathname==='/api/feishu/settings')return updateFeishuSettings(s,b);
+          if(req.method==='POST'&&pathname==='/api/feishu/sync')return queueFeishuSync(s);
           if(req.method==='POST'&&pathname==='/api/trends/refresh'){if(b.accountId)accountById(s,b.accountId);return queueTrends(s);}
           if(req.method==='POST'&&pathname==='/api/reports/generate'){const a=accountById(s,b.accountId||s.defaultAccountId);return queueReport(s,a,b.date);}
           const reportSettingRoute=pathname.match(/^\/api\/accounts\/([^/]+)\/report-settings$/);
@@ -638,7 +657,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(req.method==='POST'&&m[2]==='read-link'){queueLinkRead(s,r);return r;}
             if(req.method==='POST'&&m[2]==='analyze'){
               if(s.analysisTasks.some(t=>t.referenceId===r.id&&activeTask(t)))throw new InputError('这条笔记正在自动拆解，请等待完成',409);
-              r.analysis=await analyze(env,r,await imagesFor(r,root,directory),s.product,fetcher);r.analysisFingerprint=fingerprint(r,s.product);r.status='analyzed';r.method='ai';r.analyzedAt=now();
+              r.analysis=await analyze(env,r,await imagesFor(r,root,directory),productForAI(s),fetcher);r.analysisFingerprint=fingerprint(r,s.product);r.status='analyzed';r.method='ai';r.analyzedAt=now();
               for(const task of s.analysisTasks.filter(t=>t.referenceId===r.id&&['failed','blocked'].includes(t.status)))Object.assign(task,{status:'completed',reused:true,resolvedBy:'manual',reason:null,error:null,sourceFingerprint:r.analysisFingerprint,completedAt:now()});
               store.event(s,'analysis',`完成参考分析：${r.title}`);return r;
             }
@@ -664,6 +683,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         const reading=result.item||result;if(req.method==='POST'&&reading.linkRead?.status==='queued'&&(pathname==='/api/inspirations'||/^\/api\/inspirations\/[^/]+\/read-link$/.test(pathname)))scheduleLinkRead(reading.id,reading.linkRead.attemptId);
         if(pathname.startsWith('/api/creators')){pumpCreatorSyncs();pumpAnalyses();}
         if(pathname.startsWith('/api/trends')||pathname.startsWith('/api/reports'))pumpEditorial();
+        if(pathname.startsWith('/api/feishu'))pumpFeishu();
         return json(res,result);
       }
       if(req.method!=='GET'&&req.method!=='HEAD')throw new InputError('请求不支持',405);
@@ -676,7 +696,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
+  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);

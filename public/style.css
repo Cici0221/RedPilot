@@ -376,3 +376,45 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 .draft-source-links{display:grid;gap:9px;margin-top:7px}
 .draft-source-links .operation-source{font-size:10px;line-height:1.8}
 .draft-discussion-link{margin-top:15px;padding-top:11px;border-top:1px solid #edf1f7}
+
+/* Synced Feishu source snapshots. */
+.feishu-layout{display:grid;grid-template-columns:minmax(290px,.9fr) minmax(0,1.1fr);gap:25px;align-items:start}
+.feishu-settings-panel{padding:22px}
+#feishu-settings-form fieldset{border:0;padding:0;margin:0;min-width:0}
+#feishu-settings-form fieldset:disabled{opacity:.7}
+.feishu-setting-top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:25px}
+.feishu-setting-top>.check-label{font-size:12px;color:#7187a6}
+.feishu-setting-top>select{width:auto;min-width:128px;font-size:11px;padding:9px 10px;background:#fff}
+#feishu-source-urls{font-size:11px;line-height:1.9;min-height:166px;overflow-wrap:anywhere}
+#feishu-settings-form .actions>.btn{font-size:11px;padding:9px 12px}
+.feishu-save-state{font-size:9px;color:#a5b2c4;margin-left:3px}
+.feishu-boundary{font-size:10px;color:#a0aec1;line-height:1.8;margin-top:17px}
+.feishu-sync-live{margin-top:22px;padding-top:19px;border-top:1px solid #eaf0f7}
+.feishu-live-heading{display:flex;align-items:center;gap:10px}
+.feishu-live-heading>span:not(.badge){font-size:9px;color:#a4b2c5}
+.feishu-sync-times{display:grid;grid-template-columns:1fr 1fr;gap:17px 13px;margin-top:19px}
+.feishu-sync-times>div{display:grid;gap:7px;min-width:0}
+.feishu-sync-times>div:nth-child(3){grid-column:1/-1}
+.feishu-sync-times span{font-size:9px;color:#aab8cb}
+.feishu-sync-times strong{font-size:11px;font-weight:400;color:#849ab8;line-height:1.8;overflow-wrap:anywhere}
+.feishu-job-counts{font-size:10px;color:#8da5c5;line-height:1.8;margin-top:17px}
+.feishu-sync-error{font-size:10px;line-height:1.9;color:#b3956c;margin-top:16px;white-space:pre-wrap;overflow-wrap:anywhere}
+.feishu-documents-panel{min-width:0}
+.feishu-documents-panel>.operation-section-head{padding:1px 2px;margin-bottom:14px}
+.feishu-document-list{display:grid;gap:12px}
+.feishu-document{display:flex;align-items:center;justify-content:space-between;gap:20px;border:1px solid #e5ebf4;border-radius:10px;padding:19px;background:#fff;min-width:0}
+.feishu-document-main{flex:1;min-width:0}
+.feishu-document-main h3{font-size:13px;font-weight:500;color:#627a9a;line-height:1.8;overflow-wrap:anywhere}
+.feishu-document-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+.feishu-document-meta>.badge{font-size:8px;padding:3px 5px}
+.feishu-document-meta>time{font-size:9px;color:#a9b6c8}
+.feishu-document-actions{display:flex;align-items:center;gap:13px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+.feishu-document-actions>a,.feishu-document-actions>.btn{font-size:10px;padding:4px 0;color:#829ec4;text-decoration:none}
+.feishu-side-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:17px}
+.feishu-side-actions>.btn{font-size:10px}
+.feishu-snapshot-badges{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.feishu-snapshot-badges>a{font-size:10px;color:#7f9cc4;text-decoration:none;margin-left:auto}
+.feishu-snapshot-times{display:flex;align-items:center;gap:14px;flex-wrap:wrap;color:#a7b5c9;font-size:9px;line-height:1.9;margin-top:15px}
+.feishu-snapshot-text{font-family:var(--font);font-size:12px;font-weight:400;line-height:2;color:#7a8da7;border-top:1px solid #edf1f7;margin:20px 0 0;padding-top:20px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:58vh;overflow:auto;scrollbar-width:thin;scrollbar-color:#dce5f2 transparent}
+@media(max-width:1100px){.feishu-layout{grid-template-columns:1fr;gap:25px}.feishu-document{padding:18px}.feishu-sync-times{grid-template-columns:repeat(3,minmax(0,1fr))}.feishu-sync-times>div:nth-child(3){grid-column:auto}}
+@media(max-width:760px){.feishu-settings-panel{padding:19px}.feishu-setting-top{gap:12px}.feishu-setting-top>.check-label{font-size:11px}.feishu-setting-top>select{min-width:115px;font-size:10px}#feishu-source-urls{font-size:16px}.feishu-sync-times{grid-template-columns:1fr 1fr}.feishu-sync-times>div:nth-child(3){grid-column:1/-1}.feishu-document{padding:16px;display:block}.feishu-document-main h3{font-size:12px}.feishu-document-actions{justify-content:flex-start;margin-top:12px;gap:17px}.feishu-document-meta>time{font-size:8px}.feishu-snapshot-text{font-size:12px;max-height:55vh}}

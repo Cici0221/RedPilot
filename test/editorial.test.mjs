@@ -19,7 +19,7 @@ async function fixture(t, { env = {}, trendReader = async () => [], fetcher = as
   await configureAuth({ directory, ...credentials });
   let currentEnv = env, app, base, cookie;
   async function open() {
-    app = await createApp({ root, directory, env: currentEnv, trendReader, fetcher, linkReader: offlineLinkReader });
+    app = await createApp({ feishuReader: async () => ({ status: 'unavailable', documents: [], sources: [], error: 'test-only offline' }), root, directory, env: currentEnv, trendReader, fetcher, linkReader: offlineLinkReader });
     await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
     base = `http://127.0.0.1:${app.server.address().port}`;
     const response = await fetch(base + '/api/auth/login', { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify(credentials) });

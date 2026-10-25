@@ -11,7 +11,7 @@
     "dev": "node --env-file-if-exists=.env --watch app/server.mjs",
     "start": "node --env-file-if-exists=.env app/server.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check app/server.mjs && node --check app/editorial.mjs && node --check app/trend-sources.mjs && node --check app/accounts.mjs && node --check app/store.mjs && node --check app/ai.mjs && node --check app/content.mjs && node --check public/app.js && node --check app/product-assets.mjs && node --check app/model-uploads.mjs && node --check app/image-workbench.mjs && node --check app/link-reader.mjs && node --check app/xhs-page-extract.mjs && node --check app/creators.mjs && node --check app/creator-reader.mjs && node --check app/xhs-creator-extract.mjs && node --check app/auth.mjs && node --check scripts/configure-auth.mjs && node --check public/login.js",
+    "check": "node --check app/server.mjs && node --check app/feishu.mjs && node --check app/feishu-reader.mjs && node --check app/editorial.mjs && node --check app/trend-sources.mjs && node --check app/accounts.mjs && node --check app/store.mjs && node --check app/ai.mjs && node --check app/content.mjs && node --check public/app.js && node --check app/product-assets.mjs && node --check app/model-uploads.mjs && node --check app/image-workbench.mjs && node --check app/link-reader.mjs && node --check app/xhs-page-extract.mjs && node --check app/creators.mjs && node --check app/creator-reader.mjs && node --check app/xhs-creator-extract.mjs && node --check app/auth.mjs && node --check scripts/configure-auth.mjs && node --check public/login.js",
     "auth:configure": "node --env-file-if-exists=.env scripts/configure-auth.mjs"
   }
 }

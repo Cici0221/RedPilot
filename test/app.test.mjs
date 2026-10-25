@@ -12,7 +12,7 @@ async function fixture(t, env = {}, fetcher) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'redpilot-test-'));
   const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
   await configureAuth({ directory, ...credentials });
-  const app = await createApp({ trendReader: async () => [], linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env, fetcher });
+  const app = await createApp({ feishuReader: async () => ({ status: 'unavailable', documents: [], sources: [], error: 'test-only offline' }), trendReader: async () => [], linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env, fetcher });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`;
   t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
