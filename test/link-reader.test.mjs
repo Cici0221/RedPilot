@@ -18,7 +18,7 @@ async function fixture(t, { linkReader = async ({ url }) => page(url), beforeClo
   const directory = await mkdtemp(path.join(os.tmpdir(), 'redpilot-link-reader-'));
   const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
   await configureAuth({ directory, ...credentials });
-  let app = await createApp({ root, directory, env: {}, linkReader });
+  let app = await createApp({ trendReader: async () => [], root, directory, env: {}, linkReader });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let base = `http://127.0.0.1:${app.server.address().port}`, cookie;
   async function login() {
@@ -30,7 +30,7 @@ async function fixture(t, { linkReader = async ({ url }) => page(url), beforeClo
   return {
     get store() { return app.store; },
     async reopen() {
-      await app.close(); app = await createApp({ root, directory, env: {}, linkReader });
+      await app.close(); app = await createApp({ trendReader: async () => [], root, directory, env: {}, linkReader });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; await login();
     },
     async request(url, data, method = 'POST', authenticated = true) {

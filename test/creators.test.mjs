@@ -30,7 +30,7 @@ async function fixture(t, { env = {}, creatorReader = async () => snapshot(), li
   const directory = await mkdtemp(path.join(os.tmpdir(), 'redpilot-creators-'));
   const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
   await configureAuth({ directory, ...credentials });
-  let currentEnv = env, app = await createApp({ root, directory, env: currentEnv, creatorReader, linkReader, fetcher });
+  let currentEnv = env, app = await createApp({ trendReader: async () => [], root, directory, env: currentEnv, creatorReader, linkReader, fetcher });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let base = `http://127.0.0.1:${app.server.address().port}`, cookie;
   async function login() {
@@ -42,7 +42,7 @@ async function fixture(t, { env = {}, creatorReader = async () => snapshot(), li
   return {
     get store() { return app.store; }, tick: date => app.tick(date),
     async reopen(nextEnv = currentEnv) {
-      await app.close(); currentEnv = nextEnv; app = await createApp({ root, directory, env: currentEnv, creatorReader, linkReader, fetcher });
+      await app.close(); currentEnv = nextEnv; app = await createApp({ trendReader: async () => [], root, directory, env: currentEnv, creatorReader, linkReader, fetcher });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; await login();
     },
     async request(url, data, method = 'POST', { authenticated = true, headers = {} } = {}) {

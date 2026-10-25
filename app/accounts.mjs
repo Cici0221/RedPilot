@@ -1,6 +1,7 @@
 import { id, now, InputError, str, sourceUrl, validateSettings } from './content.mjs';
 
 export const defaultSettings = () => ({ enabled: false, time: '10:00', timezone: 'Asia/Shanghai', mode: 'automatic', imageShare: 70 });
+export const defaultReportSettings = () => ({ enabled:true,time:'09:00',timezone:'Asia/Shanghai',lastDailyKey:null });
 export const unfinished = job => ['scheduled', 'blocked', 'publishing', 'uncertain'].includes(job.status);
 
 export function accountById(state, accountId = state.defaultAccountId, allowArchived = false) {
@@ -49,6 +50,7 @@ export function migrateAccounts(state, legacyBridgeAccountId = '') {
     account.settings = { ...defaultSettings(), ...account.settings };
     account.dailyHistory ||= [];
     account.contentMix ||= { imageShare: account.settings.imageShare, total: 0, imageCount: 0 };
+    account.reportSettings = {...defaultReportSettings(),...account.reportSettings};
   }
   state.schemaVersion = 3;
   syncDefaultSettings(state);
@@ -70,7 +72,7 @@ export function validateAccount(input, current = null) {
 
 export function createAccount(state, input) {
   const account = { ...validateAccount(input), id: id(), archived: false,
-    settings: defaultSettings(), dailyHistory: [], contentMix: { imageShare: 70, total: 0, imageCount: 0 }, lastDailyKey: null, createdAt: now(), updatedAt: now() };
+    settings: defaultSettings(), reportSettings:defaultReportSettings(), dailyHistory: [], contentMix: { imageShare: 70, total: 0, imageCount: 0 }, lastDailyKey: null, createdAt: now(), updatedAt: now() };
   ensureUniqueMapping(state, account);
   state.accounts.push(account);
   return account;

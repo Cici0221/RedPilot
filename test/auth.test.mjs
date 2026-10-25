@@ -16,7 +16,7 @@ async function fixture(t, { configured = true, email = TEST_EMAIL, secret = pass
   let clock = Date.now();
   const authClock = () => clock;
   if (configured) await configureAuth({ directory, email, password: secret });
-  let app = await createApp({ linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env: {}, authClock });
+  let app = await createApp({ trendReader: async () => [], linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env: {}, authClock });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let base = `http://127.0.0.1:${app.server.address().port}`;
   t.after(async () => {
@@ -28,7 +28,7 @@ async function fixture(t, { configured = true, email = TEST_EMAIL, secret = pass
     advance(milliseconds) { clock += milliseconds; },
     async reopen() {
       await app.close();
-      app = await createApp({ linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env: {}, authClock });
+      app = await createApp({ trendReader: async () => [], linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env: {}, authClock });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
       base = `http://127.0.0.1:${app.server.address().port}`;
     },
