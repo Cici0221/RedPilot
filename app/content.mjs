@@ -29,20 +29,27 @@ export function validateProduct(p) {
     summary: str(p.summary, 5000, true), facts: lines(p.facts), conditions: lines(p.conditions),
     restrictions: lines(p.restrictions), sources: lines(p.sources, 15).map(sourceUrl), version: id(), updatedAt: now() };
 }
+export function contentMode(value = 'image') {
+  if (!['text', 'image'].includes(value)) throw new InputError('稿件类型不正确');
+  return value;
+}
 export function validateDraft(d) {
-  return { title: str(d.title, 80, true), body: str(d.body, 8000, true), tags: lines(d.tags, 10),
+  const mode = contentMode(d.contentMode);
+  return { contentMode: mode, title: str(d.title, 80, true), body: str(d.body, 8000, true), tags: lines(d.tags, 10),
     series: str(d.series || '通信小麻烦', 80, true),
     slides: (() => {
-      if (!Array.isArray(d.slides) || !d.slides.length || d.slides.length > 9) throw new InputError('图集需要 1 至 9 页');
-      return d.slides.map(s => ({ headline: str(s.headline, 120, true), body: str(s.body || '', 1500) }));
+      if (mode === 'text') return [];
+      const slides = d.slides ?? [];
+      if (!Array.isArray(slides) || slides.length > 9) throw new InputError('图片策划最多 9 页');
+      return slides.map(s => ({ headline: str(s.headline, 120, true), body: str(s.body || '', 1500) }));
     })(), gaps: lines(d.gaps || [], 20) };
 }
-export function checks(d, product) {
+export function checks(d, product, assets = []) {
   const problems = [];
   if (d.productVersion !== product.version) problems.push('产品资料已更新，请重新生成或核对后保存草稿');
   if ([...d.title].length > 20) problems.push('标题超过 20 字，请缩短');
   if ([...d.body].length > 1000) problems.push('正文超过 1000 字，请精简');
-  if (!d.slides?.length) problems.push('缺少图片分镜');
+  if (d.contentMode !== 'text' && !d.productAssetIds?.some(key => assets.some(a => a.id === key && a.kind === 'image'))) problems.push('请至少选择一张真实产品图作为主图');
   if (d.gaps?.length) problems.push(...d.gaps);
   const text = `${d.title}\n${d.body}\n${d.slides?.map(s=>s.headline+' '+s.body).join('\n')}`;
   const promises = /零延迟|永不漏接|全运营商|全机型|零漫游|双卡同时在线|正式发售|已售\d|100%/;
@@ -50,12 +57,13 @@ export function checks(d, product) {
   if (!text.includes(product.stage) && !text.includes('内测')) problems.push('请补充当前产品阶段说明');
   return [...new Set(problems)];
 }
-export function templateDraft(product, reference, instruction = '') {
+export function templateDraft(product, reference, instruction = '', mode = 'image') {
+  contentMode(mode);
   const name = product.name;
   const custom = instruction.trim();
-  return { title: `${name}，先聊聊你的使用场景`, series: '一起打磨',
+  return { contentMode: mode, title: `${name}，先聊聊你的使用场景`, series: '一起打磨',
     body: `我们是${product.brand}，正在做 ${name}。\n\n${product.summary}\n\n资料中记录的方向：\n${product.facts.map(x=>'· '+x).join('\n')}\n\n先说清条件：\n${product.conditions.map(x=>'· '+x).join('\n')}\n\n当前阶段：${product.stage}。具体表现需要以当前实机测试为准。\n\n你最想解决哪种通信困扰？可以只讲场景，不用留下号码。`,
-    tags: [name, '产品开发', '内测意向'], slides: [
+    tags: [name, '产品开发', '内测意向'], slides: mode === 'text' ? [] : [
       {headline: '你想解决的\n通信小麻烦？', body: `${name} · 需求征集`},
       {headline: '我们正在做什么', body: product.summary},
       {headline: '使用条件先讲清', body: product.conditions.join('\n')},
@@ -72,5 +80,7 @@ export function validateSettings(s) {
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.time)) throw new InputError('时间格式应为 HH:mm');
   if (!['automatic','review'].includes(s.mode)) throw new InputError('发布模式不正确');
   if (typeof s.enabled !== 'boolean') throw new InputError('启用状态不正确');
-  return { enabled:s.enabled, timezone, time:s.time, mode:s.mode };
+  const imageShare = s.imageShare === undefined ? 70 : s.imageShare;
+  if (!Number.isInteger(imageShare) || imageShare < 0 || imageShare > 100) throw new InputError('图文占比应为 0 至 100 的整数');
+  return { enabled:s.enabled, timezone, time:s.time, mode:s.mode, imageShare };
 }

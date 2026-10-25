@@ -1,0 +1,177 @@
+import { InputError, str } from './content.mjs';
+
+const DEFAULT_MODEL = 'gpt-image-2.5-sunburst';
+const SIZES = new Set(['1024x1024', '1024x1536', '1536x1024']);
+const RASTER_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_BASE64_LENGTH = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
+const MAX_RESPONSE_BYTES = MAX_BASE64_LENGTH + 128 * 1024;
+const REQUEST_TIMEOUT_MS = 180000;
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+function credentials(env) {
+  // Text-provider keys are deliberately separate, including for compatible providers.
+  const key = typeof env.REDPILOT_IMAGE_API_KEY === 'string' && env.REDPILOT_IMAGE_API_KEY.trim()
+    || typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim()
+    || '';
+  const model = typeof env.REDPILOT_IMAGE_MODEL === 'string' && env.REDPILOT_IMAGE_MODEL.trim() || DEFAULT_MODEL;
+  return { key, model };
+}
+
+export function imageProviderStatus(env = process.env) {
+  const { key, model } = credentials(env);
+  return { ready: Boolean(key), model };
+}
+
+function normalizeRequest(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new InputError('图片请求格式不正确');
+  const mode = input.mode ?? 'generate';
+  if (!['generate', 'edit'].includes(mode)) throw new InputError('图片操作应为生成或参考图编辑');
+  const prompt = str(input.prompt, 4000, true);
+  const size = input.size ?? '1024x1536';
+  if (!SIZES.has(size)) throw new InputError('图片尺寸不受支持');
+  const ids = input.sourceAssetIds ?? [];
+  if (!Array.isArray(ids) || ids.length > 4 || ids.some(id => typeof id !== 'string' || !id || id.length > 180)) {
+    throw new InputError('参考图最多选择 4 张');
+  }
+  if (new Set(ids).size !== ids.length) throw new InputError('参考图不能重复选择');
+  if (mode === 'generate' && ids.length) throw new InputError('纯文字生图不能携带参考图，请选择参考图编辑');
+  if (mode === 'edit' && !ids.length) throw new InputError('参考图编辑至少选择 1 张图片');
+  return { mode, prompt, sourceAssetIds: [...ids], size };
+}
+
+export function validateImageRequest(input, assets = []) {
+  const request = normalizeRequest(input);
+  for (const key of request.sourceAssetIds) {
+    const asset = assets.find(asset => asset.id === key);
+    if (!asset || asset.kind !== 'image' || !RASTER_MIMES.has(asset.mime)) {
+      throw new InputError('参考图必须是素材库中的 PNG、JPEG 或 WebP 图片');
+    }
+    if (asset.size > MAX_IMAGE_BYTES) throw new InputError('单张参考图不能超过 20MB');
+  }
+  return request;
+}
+
+function endpoint(env, mode) {
+  let base;
+  try { base = new URL(env.REDPILOT_IMAGE_BASE_URL || 'https://api.openai.com/v1'); }
+  catch { throw new InputError('图片服务地址配置不正确', 409); }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname);
+  if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && loopback)) || base.username || base.password || base.search || base.hash) {
+    throw new InputError('图片服务地址需要使用 HTTPS，且不能包含凭据或查询参数', 409);
+  }
+  return base.href.replace(/\/+$/, '') + (mode === 'edit' ? '/images/edits' : '/images/generations');
+}
+
+function rasterType(bytes) {
+  // Match full format signatures, not filenames or provider-supplied MIME values.
+  if (bytes.length >= 45 && bytes.subarray(0, 8).equals(PNG_SIGNATURE)
+    && bytes.readUInt32BE(8) === 13 && bytes.toString('ascii', 12, 16) === 'IHDR'
+    && bytes.readUInt32BE(16) > 0 && bytes.readUInt32BE(20) > 0
+    && bytes.subarray(-12).equals(Buffer.from([0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]))) {
+    return { mime: 'image/png', extension: 'png' };
+  }
+  if (bytes.length >= 32 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+    && bytes[bytes.length - 2] === 0xff && bytes[bytes.length - 1] === 0xd9) {
+    return { mime: 'image/jpeg', extension: 'jpg' };
+  }
+  if (bytes.length >= 26 && bytes.toString('ascii', 0, 4) === 'RIFF'
+    && bytes.readUInt32LE(4) + 8 === bytes.length && bytes.toString('ascii', 8, 12) === 'WEBP'
+    && ['VP8 ', 'VP8L', 'VP8X'].includes(bytes.toString('ascii', 12, 16))
+    && bytes.readUInt32LE(16) > 0 && bytes.readUInt32LE(16) <= bytes.length - 20) {
+    return { mime: 'image/webp', extension: 'webp' };
+  }
+  throw new InputError('图片内容不是有效的 PNG、JPEG 或 WebP 文件', 502);
+}
+
+function referenceFiles(request, images) {
+  if (!Array.isArray(images) || images.length !== request.sourceAssetIds.length) throw new InputError('参考图片数据与所选素材不一致');
+  return images.map((image, index) => {
+    if (!image || !(image.bytes instanceof Uint8Array)) throw new InputError('参考图片数据不正确');
+    const bytes = Buffer.from(image.bytes);
+    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new InputError('单张参考图不能超过 20MB');
+    let type;
+    try { type = rasterType(bytes); } catch { throw new InputError('参考图内容不是有效的 PNG、JPEG 或 WebP 文件'); }
+    if (image.mime !== type.mime) throw new InputError('参考图内容与格式不一致');
+    // Only a filename is sent; local paths are never disclosed to the provider.
+    const name = typeof image.name === 'string' ? image.name.split(/[\\/]/).at(-1).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) : '';
+    return { bytes, mime: type.mime, name: name || `reference-${index + 1}.${type.extension}` };
+  });
+}
+
+async function boundedJson(response) {
+  const contentLength = response.headers?.get('content-length');
+  if (contentLength && Number(contentLength) > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel().catch(() => {});
+    throw new InputError('图片服务返回的数据超过大小限制', 502);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new InputError('图片服务未返回有效结果', 502);
+  const chunks = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new InputError('图片服务返回的数据超过大小限制', 502);
+      }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, length))); }
+  catch { throw new InputError('图片服务返回格式不正确', 502); }
+}
+
+function resultImage(body) {
+  if (!Array.isArray(body?.data) || body.data.length !== 1 || typeof body.data[0]?.b64_json !== 'string') {
+    throw new InputError('图片服务没有返回图片编码，请检查服务是否支持 b64_json', 502);
+  }
+  const encoded = body.data[0].b64_json;
+  if (encoded.length > MAX_BASE64_LENGTH) throw new InputError('生成图片不能超过 20MB', 502);
+  if (!encoded.length || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    throw new InputError('图片服务返回的图片编码不正确', 502);
+  }
+  const bytes = Buffer.from(encoded, 'base64');
+  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES || bytes.toString('base64') !== encoded) {
+    throw new InputError('图片服务返回的图片编码不正确', 502);
+  }
+  return { bytes, ...rasterType(bytes) };
+}
+
+export async function generateImage(env = process.env, { request: input, sourceImages = [] }, fetcher = fetch) {
+  const request = normalizeRequest(input);
+  const files = referenceFiles(request, sourceImages);
+  const { key, model } = credentials(env);
+  if (!key) throw new InputError('图片生成功能未配置，请设置图片服务 API Key', 409);
+  if (/[\r\n]/.test(key) || !/^[A-Za-z0-9._:/-]{1,200}$/.test(model)) throw new InputError('图片服务配置不正确', 409);
+  const url = endpoint(env, request.mode);
+  const headers = { Authorization: `Bearer ${key}` };
+  let body;
+  if (request.mode === 'edit') {
+    body = new FormData();
+    for (const [name, value] of Object.entries({ model, prompt: request.prompt, n: '1', size: request.size, output_format: 'png' })) body.append(name, value);
+    for (const file of files) body.append('image[]', new Blob([file.bytes], { type: file.mime }), file.name);
+  } else {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify({ model, prompt: request.prompt, n: 1, size: request.size, output_format: 'png' });
+  }
+  const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  try {
+    // GPT Image always returns b64_json. Never follow redirects or fetch output URLs.
+    const response = await fetcher(url, { method: 'POST', headers, body, signal, redirect: 'error' });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      const status = Number.isInteger(response.status) ? response.status : 502;
+      throw new InputError(`图片服务请求失败（HTTP ${status}），请检查配置或稍后重试`, 502);
+    }
+    const result = resultImage(await boundedJson(response));
+    return { ...result, model, size: request.size };
+  } catch (error) {
+    if (signal.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError') throw new InputError('图片服务请求超时，请稍后重试', 504);
+    if (error instanceof InputError) throw error;
+    throw new InputError('图片服务请求未完成，请检查网络或稍后重试', 502);
+  }
+}

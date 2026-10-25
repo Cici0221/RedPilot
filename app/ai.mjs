@@ -28,7 +28,10 @@ export async function analyze(env, reference, images, product, fetcher) {
   const a = await callAI(env, `请分析参考，产品用于判断适配，不用于推断参考内容。返回 JSON {"topic":"选题角度","titlePattern":"标题结构","visual":"封面层级与配色；无图片就注明未知","structure":["仅描述可见结构"],"adaptation":"可以为自己产品学习什么","observations":["注明文字段落或截图序号的观察"],"inferences":["推断"],"unknown":["缺失信息"]}。产品：${JSON.stringify(product)}。参考标题：${reference.title}。用户备注：${reference.note}。用户提供的可见正文：${reference.text || '无'}。链接只作为来源记录，未读取：${reference.url || '无'}。`,images,fetcher);
   return {topic:str(a.topic,2000,true),titlePattern:str(a.titlePattern,2000,true),visual:str(a.visual,2000,true),structure:lines(a.structure),adaptation:str(a.adaptation,2000,true),observations:lines(a.observations),inferences:lines(a.inferences),unknown:lines(a.unknown)};
 }
-export async function generate(env, product, reference, instruction, mode, images, fetcher) {
-  const d = await callAI(env, `围绕自有产品生成原创小红书图文草稿。返回 JSON {"title":"20字内标题","body":"1000字内正文，说明使用条件与当前阶段","tags":["话题不加井号"],"series":"通信小麻烦或接通实验或一起打磨","slides":[{"headline":"不超过30字，允许换行","body":"本页文案不超过150字"}],"gaps":["缺少必须验证的事实或素材；就绪则空数组"],"adaptation":"具体借鉴哪些结构和视觉规律"}。3至6页图集，均使用原创文字图解，不能要求或冒用竞品图。产品：${JSON.stringify(product)}。参考资料：${JSON.stringify(reference)}。借鉴模式：${mode}。用户创作要求：${instruction || '选择适合产品的具体生活场景'}。当前没有实际视频、实测数据；只写资料支持的方向，不虚构已完成演示。`,images,fetcher);
-  return {...validateDraft(d),adaptation:str(d.adaptation,2000,true),method:'ai'};
+export async function generate(env, product, reference, instruction, mode, images, fetcher, contentMode = 'image') {
+  const visual = contentMode === 'text'
+    ? '本次是文字稿，只有标题、正文和话题，slides必须是空数组。正文独立表达完整场景，不依赖图片说明；发布时由小红书发布端使用原生默认配图。不要虚构或仿制原生模板。'
+    : '本次是图文稿，实际配图使用已选自有产品原图或3D渲染图，不强制文字卡。slides可为空数组，若有则只作为辅助图片策划而非实际发布图片。不能要求或冒用竞品图片；无产品原图时注明需要补图，不能凭空伪造产品外形。';
+  const d = await callAI(env, `围绕自有产品生成原创小红书草稿。返回 JSON {"title":"20字内标题","body":"1000字内正文，说明使用条件与当前阶段","tags":["话题不加井号"],"series":"通信小麻烦或接通实验或一起打磨","slides":[{"headline":"不超过30字，允许换行","body":"本页文案不超过150字"}],"gaps":["缺少必须验证的事实或素材；就绪则空数组"],"adaptation":"具体借鉴哪些结构和表达规律"}。${visual}产品：${JSON.stringify(product)}。参考资料：${JSON.stringify(reference)}。借鉴模式：${mode}。用户创作要求：${instruction || '选择适合产品的具体生活场景'}。当前没有实际视频、实测数据；只写资料支持的方向，不虚构已完成演示。`,images,fetcher);
+  return {...validateDraft({...d, contentMode}),adaptation:str(d.adaptation,2000,true),method:'ai'};
 }

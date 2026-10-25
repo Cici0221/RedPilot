@@ -1,6 +1,6 @@
 import { id, now, InputError, str, sourceUrl, validateSettings } from './content.mjs';
 
-export const defaultSettings = () => ({ enabled: false, time: '10:00', timezone: 'Asia/Shanghai', mode: 'automatic' });
+export const defaultSettings = () => ({ enabled: false, time: '10:00', timezone: 'Asia/Shanghai', mode: 'automatic', imageShare: 70 });
 export const unfinished = job => ['scheduled', 'blocked', 'publishing', 'uncertain'].includes(job.status);
 
 export function accountById(state, accountId = state.defaultAccountId, allowArchived = false) {
@@ -45,7 +45,12 @@ export function migrateAccounts(state, legacyBridgeAccountId = '') {
       draft.accountId = priorJob?.accountId || account.id;
     }
   }
-  state.schemaVersion = 2;
+  for (const account of state.accounts) {
+    account.settings = { ...defaultSettings(), ...account.settings };
+    account.dailyHistory ||= [];
+    account.contentMix ||= { imageShare: account.settings.imageShare, total: 0, imageCount: 0 };
+  }
+  state.schemaVersion = 3;
   syncDefaultSettings(state);
   return state;
 }
@@ -65,7 +70,7 @@ export function validateAccount(input, current = null) {
 
 export function createAccount(state, input) {
   const account = { ...validateAccount(input), id: id(), archived: false,
-    settings: defaultSettings(), lastDailyKey: null, createdAt: now(), updatedAt: now() };
+    settings: defaultSettings(), dailyHistory: [], contentMix: { imageShare: 70, total: 0, imageCount: 0 }, lastDailyKey: null, createdAt: now(), updatedAt: now() };
   ensureUniqueMapping(state, account);
   state.accounts.push(account);
   return account;
@@ -110,7 +115,9 @@ export function archiveAccount(state, accountId) {
 
 export function saveAccountSettings(state, accountId, input) {
   const account = accountById(state, accountId);
-  account.settings = validateSettings(input);
+  const setting = validateSettings({ ...account.settings, ...input });
+  if (setting.imageShare !== account.settings.imageShare) account.contentMix = { imageShare: setting.imageShare, total: 0, imageCount: 0 };
+  account.settings = setting;
   account.updatedAt = now();
   syncDefaultSettings(state);
   return account.settings;

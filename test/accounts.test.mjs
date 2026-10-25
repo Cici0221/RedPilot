@@ -42,6 +42,15 @@ async function fixture(t, { env = {}, fetcher, legacy } = {}) {
     await rm(directory, { recursive: true, force: true });
   });
   await login();
+  const upload = await fetch(base + '/api/product-assets/upload', {
+    method: 'POST', headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'test-product.png', kind: 'image', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ioAAAAASUVORK5CYII=' })
+  });
+  assert.equal(upload.status, 200, 'fixture product image upload failed');
+  await app.store.mutate(s => {
+    const image = s.productAssets.find(asset => asset.kind === 'image');
+    for (const draft of s.drafts) draft.productAssetIds = [image.id];
+  });
   return {
     get store() { return app.store; },
     tick: date => app.tick(date),
@@ -116,7 +125,7 @@ function legacyState() {
 test('initial official account and new personal account retain independent settings', async t => {
   const f = await fixture(t, { env: bridgeEnv });
   const initial = await state(f);
-  assert.equal(initial.schemaVersion, 2);
+  assert.equal(initial.schemaVersion, 3);
   assert.equal(initial.accounts.length, 1);
   const official = initial.accounts[0];
   assert.equal(initial.defaultAccountId, official.id);

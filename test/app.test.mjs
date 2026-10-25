@@ -22,6 +22,15 @@ async function fixture(t, env = {}, fetcher) {
   assert.equal(login.status, 200, 'fixture login failed');
   const cookie = login.headers.get('set-cookie')?.split(';')[0];
   assert.ok(cookie, 'fixture session cookie missing');
+  const upload = await fetch(base + '/api/product-assets/upload', {
+    method: 'POST', headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'test-product.png', kind: 'image', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ioAAAAASUVORK5CYII=' })
+  });
+  assert.equal(upload.status, 200, 'fixture product image upload failed');
+  await app.store.mutate(s => {
+    const image = s.productAssets.find(asset => asset.kind === 'image');
+    for (const draft of s.drafts) draft.productAssetIds = [image.id];
+  });
   return { ...app, base, cookie, directory, async request(url, data, method = 'POST', extra = {}) {
     const response = await fetch(base + '/api/' + url, {
       method, headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json', ...extra },

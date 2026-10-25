@@ -127,3 +127,62 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 .session-user span{font-size:10px;color:#a3aebf;flex-shrink:0}
 .session-user strong{font-size:11px;font-weight:400;color:#8395ae;overflow-wrap:anywhere}
 @media(max-width:760px){.sidebar-auth{position:absolute;top:16px;right:20px;padding:0}.sidebar-auth .btn{font-size:10px}.login-card{max-width:370px;padding:28px}.login-card input{font-size:16px}.login-layout{padding:24px}.login-brand{margin-bottom:29px}}
+
+/* Drafts use native text mode or actual product picture files. */
+.draft-toolbar{margin-bottom:20px}
+.draft-thumb-label{display:flex;align-items:center;justify-content:center;background:#f7faff;border:1px solid #e3ebf6;color:#9aaec9;font-size:10px;text-align:center;border-radius:7px}
+.product-draft-thumb{object-fit:contain;background:#fff}
+.mode-note{font-size:10px;line-height:1.8;color:#99a9be;margin:0 0 18px}
+.save-state{font-size:11px}
+.product-photo-preview{display:block;width:100%;height:auto;max-height:620px;object-fit:contain;background:#fff;border:1px solid #e4eaf2;border-radius:10px}
+.missing-photo-preview{padding:60px 24px;text-align:center;border:1px dashed #d9e4f3;background:#fbfdff;border-radius:10px;color:#94a6c0;font-size:12px;line-height:1.9}
+.missing-photo-preview>small{display:block;font-size:10px;color:#a7b5c9;margin-top:9px}
+.preview-source{font-size:10px;color:#9cadc5;line-height:1.8;margin:10px 0 17px;overflow-wrap:anywhere}
+.preview-source:empty{display:none}
+.preview-reference{border-top:1px solid #e5ebf4;padding-top:16px;margin-top:20px}
+.preview-reference>summary{font-size:11px;color:#9cabc1;cursor:pointer}
+.preview-reference .btn{font-size:10px;text-align:left;white-space:normal}
+.native-text-preview{padding:23px;border:1px solid #e5eaf2;border-radius:10px;background:#fff}
+.native-text-preview h3{font-size:17px;line-height:1.7;font-weight:500;color:#50647f;overflow-wrap:anywhere}
+.native-text-body{white-space:pre-wrap;font-size:12px;line-height:2;color:#7a8ea9;margin-top:18px;overflow-wrap:anywhere}
+.native-text-tags{font-size:11px;line-height:1.9;color:#6c98cf;margin-top:17px;overflow-wrap:anywhere}
+.native-text-note{border-top:1px solid #edf1f7;margin-top:19px;padding-top:15px;font-size:10px;line-height:1.8;color:#a0aec1}
+.content-ratio{display:flex;align-items:center;gap:9px}
+.content-ratio>input{width:94px;flex-shrink:0}
+.content-ratio>span{font-size:12px;color:#8ea1bd}
+.content-ratio>small{font-size:11px;color:#99abc3;margin-left:10px}
+.asset-pick-info{min-width:0;flex:1}
+.asset-pick-row>span.asset-order{flex:0 0 auto;font-size:9px;color:#8cabd0;min-width:42px;text-align:right;line-height:1.7}
+@media(max-width:760px){.product-photo-preview{max-height:460px}.native-text-preview{padding:19px}.native-text-preview h3{font-size:16px}.native-text-body{font-size:12px}.preview-panel .preview-caption{font-size:10px}.asset-pick-row>span.asset-order{font-size:8px;min-width:33px}.draft-toolbar{gap:10px}.content-ratio>input{width:83px}}
+
+/* Image workbench. */
+.image-adjust-grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:28px;align-items:start}
+.image-adjust-controls{padding:22px}
+.image-adjust-controls .field>label,.image-ai-controls .field>label{font-size:11px}
+.crop-range>label{display:flex;align-items:center;justify-content:space-between}
+.crop-range>label>span{font-size:10px;color:#85a8d6;font-weight:400}
+.crop-range input[type=range]{height:25px;padding:0;border:0;background:transparent;accent-color:#007aff;cursor:pointer}
+.image-canvas-section{position:sticky;top:24px;max-width:580px;width:100%;margin:0 auto}
+.image-canvas-stage{display:flex;align-items:center;justify-content:center;border:1px solid #e4ebf5;background:#edf2f9;border-radius:11px;padding:15px;min-height:230px}
+.image-canvas-stage>canvas{display:block;width:100%;height:auto;max-height:650px;object-fit:contain;background:#fff;box-shadow:0 4px 18px #294a7620}
+.image-ai-grid{display:grid;grid-template-columns:minmax(300px,.85fr) minmax(340px,1.15fr);gap:26px;align-items:start}
+.image-ai-controls{position:sticky;top:24px}
+.image-provider{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:22px}
+.image-provider>small{font-size:10px;color:#9bacc4;overflow-wrap:anywhere}
+.image-job-section>.section-head{margin-top:0}
+.image-job-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+.image-job-list>.empty{grid-column:1/-1}
+.image-job{min-width:0;padding:15px;border:1px solid #e3eaf4;border-radius:10px;background:#fff}
+.image-job-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:12px}
+.image-job-head>span:not(.badge){font-size:10px;color:#8fa1bb}
+.image-job-head>time{font-size:9px;color:#b0bfd2;margin-left:auto}
+.image-job-result{display:block;width:100%;padding:0;background:#f7faff;border:1px solid #e8eff8;border-radius:7px;overflow:hidden;cursor:pointer}
+.image-job-result>img{width:100%;max-height:270px;display:block;object-fit:contain}
+.image-job-prompt{font-size:10px;color:#9aabc2;line-height:1.9;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin-top:11px}
+.image-job-error{font-size:11px;color:#ad8559;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0}
+.image-job>.actions{margin-top:13px;gap:8px}
+.image-job>.actions>.btn{font-size:10px;padding:7px 10px}
+#image-ai-submit:disabled{cursor:not-allowed}
+@media(max-width:1150px){.image-adjust-grid{grid-template-columns:270px minmax(0,1fr);gap:20px}.image-ai-grid{grid-template-columns:1fr}.image-ai-controls{position:static}.image-job-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:900px){.image-adjust-grid{grid-template-columns:1fr}.image-canvas-section{position:static;grid-row:1;max-width:460px}.image-adjust-controls{max-width:520px;width:100%;margin:0 auto}.image-canvas-stage>canvas{max-height:460px}.image-job-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.image-adjust-grid,.image-ai-grid{gap:20px}.image-adjust-controls{padding:19px}.image-canvas-stage{padding:11px}.image-canvas-stage>canvas{max-height:420px}.image-job-list{gap:12px}.image-job{padding:13px}.image-job-head>time{font-size:8px}.image-job-result>img{max-height:230px}.image-job>.actions>.btn{padding:7px 8px}.image-provider{margin-bottom:19px}}

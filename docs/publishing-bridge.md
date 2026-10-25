@@ -1,6 +1,6 @@
-# 发布桥协议 v2
+# 发布桥协议 v3
 
-RedPilot 当前只实现调用方。发布桥需另行实现，负责自有账号的登录、图集渲染、实际发布和笔记核对；填写 URL 不等于已经连通。
+RedPilot 当前只实现调用方。发布桥需另行实现，负责自有账号的登录、文字稿原生配图、实际发布和笔记核对；填写 URL 不等于已经连通。
 
 ## 配置
 
@@ -26,19 +26,23 @@ Content-Type: application/json
     "title": "标题",
     "body": "正文",
     "tags": ["产品开发"],
-    "slides": [{"headline": "页标题", "body": "本页文字"}],
-    "sourceAssets": [{"id": "素材UUID", "name": "产品图", "mime": "image/png", "data": "base64原始素材"}],
+    "contentMode": "image",
+    "coverStrategy": "custom",
+    "slides": [],
+    "images": [{"id": "素材UUID", "name": "产品图", "mime": "image/png", "kind": "image", "data": "base64最终图片"}],
+    "sourceAssets": [{"id": "素材UUID", "name": "产品图", "mime": "image/png", "kind": "image", "data": "base64原始素材"}],
     "brand": "人类补丁",
-    "product": "SimHelper",
-    "design": "blue-white-v1"
+    "product": "SimHelper"
   },
   "noteUrl": null
 }
 ```
 
-`sourceAssets` 是用户为该草稿选中的自有图片/图标原件，可能包含真实3D渲染图；桥接服务需自行排版合成，不可将原图当作已经完成的图集。未选素材时为空数组。
+`contentMode: "image"` 使用 `coverStrategy: "custom"`。`images` 是按用户选择顺序排列的最终图片，可能为原图、裁切保存图、3D 渲染图或 AI 图片。发布桥应按该顺序上传，首图为封面；网页预览与 ZIP 导出使用同一批原件。审核及排期至少需要一张真实图片，SVG 图标不能充当主图。
 
-`slides` 是原创文字图集的分镜，**不是图片地址**。桥接服务必须将其渲染为真实图片后再提交平台；不可拿参考截图代替成稿。网页预览和 PNG 导出实现在 `public/app.js` 的 `coverSVG` / `png` 函数，尺寸 1200 × 1600。
+`sourceAssets` 附带全部所选图片与图标，供查阅来源；不重复上传到平台。`slides` 仅是可选策划文字，不是最终图片，不据此重新生成固定文字卡。
+
+`contentMode: "text"` 使用 `coverStrategy: "platform_default"`，`slides`、`images`、`sourceAssets` 均为空数组。发布桥需要使用小红书支持的原生文字配图流程，不得默默替换为自制文字卡。该流程尚未实机验证；只有桥接端实现并验证此能力后，才配置 `REDPILOT_PUBLISH_TEXT_ENABLED=true`。未配置时文字稿可审核、排期，实际提交前会阻塞，零提交次数。Web「写长文」入口不能作为原生短文字模板可用的证明。
 
 `action: "verify"` 使用同一 URL、同一账号及同一幂等键，请求结果查询。**verify 绝对不能再次发布**。首次发布前，调用方已将任务意图写入本地文件。
 
