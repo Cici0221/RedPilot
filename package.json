@@ -1,0 +1,14 @@
+{
+  "name": "redpilot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RedPilot｜薯航 — 小红书内容运营工作台",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch app/server.mjs",
+    "start": "node --env-file-if-exists=.env app/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check app/server.mjs && node --check app/content.mjs && node --check public/app.js"
+  }
+}
