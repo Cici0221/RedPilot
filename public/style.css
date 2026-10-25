@@ -8,3 +8,40 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 
 /* Personal tool: function names and controls only. */
 .page-head{margin-bottom:24px;align-items:center}.page-head h1{font-size:25px;letter-spacing:-.6px}.stats{margin-top:0}.sidebar .nav{margin-top:8px}.brand{padding-bottom:29px}.topbar-right{display:none}.section-head .mono{display:none}.sidebar-bottom p{line-height:1.8}.text-cover .mono{display:none}.text-cover h3{margin-top:15px}.upload-card{min-height:340px}.content{padding-top:30px}.preview-caption{font-size:11px}.page-head .actions{gap:8px}.settings-grid h2{font-size:17px}.sidebar{padding-top:29px}.main{padding-bottom:30px}@media(max-width:760px){.page-head h1{font-size:23px}.sidebar{padding-top:13px}.brand{padding-bottom:10px}.sidebar .nav{margin-top:0}.content{padding-top:24px}.page-head{margin-bottom:20px}.main{padding-bottom:0}}
+
+/* Multi-account workspace. */
+.account-filter{width:180px;padding:9px 11px;background:#fff;border-color:#e2e7ee;font-size:12px}
+.account-tag{display:inline-flex;align-items:center;max-width:160px;padding:3px 7px;border:1px solid #e6edf7;border-radius:5px;color:#7589a6;font-size:10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shared-note{margin-left:auto;font-size:11px;color:#98a2b2}
+.account-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.account-card{padding:22px;border:1px solid #e4e9f1;border-radius:12px;background:#fff;min-width:0}
+.account-card-head{display:flex;align-items:center;gap:12px}
+.account-avatar{display:grid;place-items:center;flex-shrink:0;width:41px;height:41px;border:1px solid #dceaff;border-radius:11px;background:#edf5ff;color:#3984e8;font-size:15px}
+.account-main{flex:1;min-width:0}
+.account-name{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.account-name h2{font-size:15px;font-weight:600;letter-spacing:0;overflow-wrap:anywhere}
+.account-main p{margin-top:7px;font-size:11px;color:#a0a9b6;overflow-wrap:anywhere}
+.account-main p a{color:#6f96c7;text-decoration:none}
+.account-details{display:grid;grid-template-columns:1.8fr repeat(3,.65fr);gap:13px;border-top:1px solid #edf0f5;border-bottom:1px solid #edf0f5;margin-top:20px;padding:18px 0}
+.account-details>div{display:flex;flex-direction:column;gap:7px;min-width:0}
+.account-details span{font-size:10px;color:#a0aaba}
+.account-details strong{font-size:14px;font-weight:500;color:#5e6b7d;overflow-wrap:anywhere}
+.account-details>div:first-child strong{font-size:12px;line-height:1.65}
+.account-details small{font-size:10px;color:#a7b2c1;line-height:1.6}
+.account-notes{font-size:11px;color:#9ba7b8;line-height:1.8;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.account-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:18px}
+.account-actions .btn{font-size:11px;padding:8px 11px}
+.account-actions .btn.ghost{padding:7px 2px}
+#account-form fieldset{border:0;margin:0;padding:0;min-width:0}
+#account-form fieldset:disabled{opacity:.7}
+.daily-account-list{display:grid;gap:12px}
+.daily-account-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:17px 20px}
+.daily-account-row strong{font-size:12px;font-weight:500;color:#66758b;margin-right:10px}
+.daily-account-row p{font-size:11px;color:#a0abba;margin-top:9px;line-height:1.7}
+.daily-account-row .btn{font-size:11px;padding:8px 13px}
+.schedule-target{display:grid;gap:8px;margin-bottom:21px;padding:15px;background:#f5f8fd;border:1px solid #e7edf6;border-radius:8px}
+.schedule-target span{font-size:10px;color:#96a4b9}
+.schedule-target strong{font-size:14px;font-weight:500;color:#5378aa}
+.schedule-target small{font-size:11px;color:#96a4b9;line-height:1.7}
+@media(max-width:1150px){.account-list{grid-template-columns:1fr}.account-filter{width:155px}.draft-meta{flex-wrap:wrap;gap:6px}}
+@media(max-width:760px){.page-head>.actions{flex-wrap:wrap;justify-content:flex-start}.account-filter{width:155px}.shared-note{width:100%;margin:6px 0 0}.account-card{padding:18px}.account-list{gap:14px}.account-details{gap:10px;grid-template-columns:1.6fr repeat(3,.7fr)}.account-card-head{gap:10px}.account-main p{font-size:10px}.account-name h2{font-size:14px}.account-details strong{font-size:13px}.daily-account-row{padding:16px}.daily-account-row p{font-size:10px}.account-tag{max-width:110px;font-size:9px}.draft-row-info h3{font-size:12px}}

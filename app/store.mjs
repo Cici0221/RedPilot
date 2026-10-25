@@ -1,7 +1,8 @@
 import { mkdir, readFile, writeFile, rename, open, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { id, now } from './content.mjs';
-export async function createStore(root, directory) {
+import { migrateAccounts } from './accounts.mjs';
+export async function createStore(root, directory, { legacyBridgeAccountId = '' } = {}) {
   await mkdir(path.join(directory, 'uploads'), {recursive:true});
   const lockPath = path.join(directory, 'server.lock');
   const acquire = async () => { const f = await open(lockPath, 'wx', 0o600); await f.writeFile(String(process.pid)); await f.close(); };
@@ -32,6 +33,7 @@ export async function createStore(root, directory) {
         gaps:[],method:'editorial_seed',referenceIds:draft.reference_ids,adaptation:draft.adaptation,productVersion:product.version,
         status:'draft',createdAt:now(),updatedAt:now(),history:[],revision:1 }], jobs:[], events:[] };
   }
+  migrateAccounts(state, legacyBridgeAccountId);
   let queue = Promise.resolve();
   async function save() {
     const tmp = filename+'.tmp'; await writeFile(tmp, JSON.stringify(state,null,2), {mode:0o600}); await rename(tmp,filename);

@@ -6,6 +6,7 @@
   "implementation_status": "local_web_mvp_with_optional_ai_and_publisher_bridge",
   "user_intent": "每天自动发帖；上传截图或保存链接到收藏库后，分析参考内容，按相近风格为公司产品生成新帖子。",
   "modules": [
+    "账号管理",
     "产品资料库",
     "灵感收藏库",
     "参考分析",
@@ -262,5 +263,22 @@
     "primary": "#007aff",
     "background": "#f5f5f7",
     "surface": "#ffffff"
+  },
+  "account_management": {
+    "scope": "多账号共享产品与灵感，草稿、排期与记录按账号归属",
+    "fields": [
+      "名称",
+      "官方或普通",
+      "账号标识",
+      "主页",
+      "定位备注",
+      "外部发布账号ID",
+      "启停状态"
+    ],
+    "default": "旧数据迁入默认官方账号",
+    "daily_settings": "每账号独立启用、时间、IANA时区、自动或审核模式以及执行日期",
+    "archive": "保留历史；有未完成任务或是默认账号时不允许归档",
+    "publishing": "新号必须单独配置外部映射；任务保存目标账号，回执须匹配目标账号；不使用默认官方号兜底",
+    "auth_status": "当前管理记录与发布映射，不代表账号已登录，真实会话由发布桥按账号隔离"
   }
 }
