@@ -19,8 +19,10 @@ export function noteKey(url) {
   if (!url) return null;
   const u = new URL(url);
   if (u.hostname === 'www.xiaohongshu.com' || u.hostname === 'xiaohongshu.com') {
+    const extended = u.pathname.match(/^\/user\/profile\/[a-f\d]{24}\/([a-f\d]{24})(?:\/|$)/i);
+    if (extended) return `explore:${extended[1].toLowerCase()}`;
     const m = u.pathname.match(/^\/(explore|discovery\/item|user\/profile)\/([a-f\d]{24})(?:\/|$)/i);
-    if (m) return `${m[1]}:${m[2].toLowerCase()}`;
+    if (m) return `${m[1]==='user/profile'?'user/profile':'explore'}:${m[2].toLowerCase()}`;
   }
   return u.origin + u.pathname + u.search;
 }

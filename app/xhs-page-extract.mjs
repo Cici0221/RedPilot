@@ -102,7 +102,7 @@ function extractXhsPage() {
   const profile = firstVisible(document, '#userPageContainer');
   const info = firstVisible(profile, '.user-info');
   const name = text(firstVisible(info, '.user-name'), 120);
-  if (profile && info && name) {
+  if (profile && info && name && /^\/user\/profile\/[a-f\d]{24}\/?$/i.test(pageUrl.pathname)) {
     result.kind = 'profile';
     result.author = name;
     result.title = `${name} · 账号主页`.slice(0, 160);

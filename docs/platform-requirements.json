@@ -9,6 +9,7 @@
     "账号管理",
     "产品资料库",
     "灵感收藏库",
+    "关注博主",
     "参考分析",
     "图文生成工作台",
     "图片工作台",
@@ -94,6 +95,40 @@
       "preservation": "保留用户填入字段与截图，网页另存pageContent快照；失败不丢来源；删除不复活，重启不盲目重读",
       "analysis": "读取无需AI密钥；参考分析与创作仍使用独立配置的AI模型"
     }
+  },
+  "creator_tracking": {
+    "inputs": "小红书主页链接或小红书号；名称不能作为唯一身份",
+    "identity": "主页URL仅接受官方HTTPS域名的24位profile ID；小红书号通过正常站内用户搜索、最多4候选，再进入主页核对可见账号号完全匹配，不区分大小写；不确定时待选择",
+    "reader": "复用本机Chrome读取桥，DOM读取；只操作自己新建的后台标签，结束后关闭；不读取Cookie、网页存储、隐藏状态或站内私有API",
+    "schedule": {
+      "default_time": "09:00",
+      "default_timezone": "Asia/Shanghai",
+      "frequency": "每博主本地日期每天自动同步一次，手动同步单独执行",
+      "conditions": "RedPilot服务运行、电脑未休眠、Chrome读取桥已连接且小红书登录可用；不补往日任务",
+      "gates": "登录或验证受阻时保留记录并提示，处理后可手动同步，不自动处理验证码"
+    },
+    "limits": {
+      "first_import": 10,
+      "scan_window_notes": 50,
+      "scrolls": 3,
+      "daily_automatic_new_notes": 20,
+      "per_manual_sync_new_notes": 20,
+      "complete_history": false,
+      "meaning": "近期窗口中的未见笔记；不按发表日期认定当天新帖，也不承诺覆盖全部历史"
+    },
+    "baseline": "首次成功建立扫描窗口基线，最多新建10篇收藏，优先非置顶；超出额度的旧笔记不在后续作为新内容批量回填",
+    "deduplication": "以笔记ID去重，普通与主页内extended链接合并；保留实际完整href及参数，不从ID制造无token链接；置顶单独标记，不以首条作为检查点",
+    "source_preservation": "同笔记关联多个博主，保留来源快照、原链接、手填字段和截图；暂停停止每日同步，归档保留历史",
+    "automatic_analysis": {
+      "default_enabled": false,
+      "configuration": "单独开启并配置REDPILOT_AI_KEY及REDPILOT_AI_MODEL；读取同步无需AI密钥",
+      "scope": "只分析已读取笔记的可见图文及产品适配；主页摘要不是笔记全文，视频未转录内容保持未知",
+      "provider_data": "该篇已读取图文、用户备注及产品资料会发往配置的文字AI服务",
+      "queue": "读取完成后串行拆解；来源或AI未就绪保留待处理，失败不自动付费重试；可处理待拆解内容",
+      "reuse": "同来源与产品版本的成功拆解复用，资料变化期间的旧结果不覆盖新资料",
+      "review": "拆解结果仍需人工核对，不能把竞品功能或成绩当作自己的产品事实"
+    },
+    "privacy": "博主记录、完整来源链接、读取图片快照、同步与拆解历史保存在忽略的runtime中，不进入公开代码仓库"
   },
   "reference_analysis": {
     "dimensions": [
@@ -282,7 +317,8 @@
       "每账号独立图文与文字比例",
       "图片裁切另存与OpenAI图片任务",
       "模型二进制上传与已有本地模型引用",
-      "小红书链接自动补齐与状态/重读"
+      "小红书链接自动补齐与状态/重读",
+      "参考博主管理、每日近期同步与可选自动拆解"
     ],
     "not_connected": [
       "实际AI服务密钥与模型",

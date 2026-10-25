@@ -243,3 +243,33 @@ test('a profile URL alone and a generic document title cannot manufacture profil
   assert.equal(value.kind, null);
   assert.equal(value.status, 'unavailable');
 });
+
+test('profile DOM under a note URL waits for the note modal instead of returning a profile snapshot', () => {
+  const profile = element('div', { id: 'userPageContainer' }, [
+    element('div', { className: 'user-info' }, [
+      element('div', { className: 'user-name', text: '示例账号' }),
+      element('div', { className: 'user-desc', text: '这是主页资料，不是笔记正文' })
+    ]),
+    element('section', { className: 'note-item' }, [
+      element('a', { className: 'title', text: '底层主页卡片摘要' }),
+      element('a', { className: 'cover' }, [image('profile-card')])
+    ])
+  ]);
+  const author = '0123456789abcdef01234567', note = '1123456789abcdef01234567';
+  for (const href of [
+    `https://www.xiaohongshu.com/user/profile/${author}/${note}?xsec_token=fixture-token`,
+    `https://www.xiaohongshu.com/explore/${note}?xsec_token=fixture-token`
+  ]) {
+    const value = extract([profile], href);
+    assert.equal(value.kind, null);
+    assert.equal(value.status, 'unavailable');
+    assert.equal(value.title, '');
+    assert.equal(value.text, '');
+    assert.deepEqual(value.imageUrls, []);
+  }
+  const actualProfile = extract([profile], `https://www.xiaohongshu.com/user/profile/${author}`);
+  assert.equal(actualProfile.kind, 'profile');
+  assert.equal(actualProfile.status, 'partial');
+  assert.equal(actualProfile.author, '示例账号');
+  assert.ok(actualProfile.text.includes('底层主页卡片摘要'));
+});

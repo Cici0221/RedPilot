@@ -11,6 +11,8 @@ import { createAuth } from './auth.mjs';
 import { imageProviderStatus, validateImageRequest, generateImage } from './image-workbench.mjs';
 import { receiveModelUpload, saveModelUpload, cleanModelUpload } from './model-uploads.mjs';
 import { inspirationUrl, supportedPageUrl, readReferenceLink } from './link-reader.mjs';
+import { readCreatorFeed, normalizeCreatorInput } from './creator-reader.mjs';
+import { creatorById, createCreator, updateCreator, archiveCreator, queueCreatorSync, activeTask } from './creators.mjs';
 import { id, now, InputError, str, lines, sourceUrl, noteKey, validateProduct, validateDraft, contentMode, checks, templateDraft, dateParts, dailyKey } from './content.mjs';
 import { aiReady, analyze, generate, imagesFor } from './ai.mjs';
 import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError } from './product-assets.mjs';
@@ -37,7 +39,7 @@ function validateFile(f) {
   else throw new InputError('仅支持 PNG、JPEG 和 WebP 图片');
   return {name,buf,ext,hash:createHash('sha256').update(buf).digest('hex')};
 }
-export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,authClock}={}) {
+export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,creatorReader,authClock}={}) {
   const auth=await createAuth({directory,clock:authClock,secureCookies:env.REDPILOT_COOKIE_SECURE==='true'});
   const store=await createStore(root,directory,{legacyBridgeAccountId:env.REDPILOT_ACCOUNT_ID || ''});
   const bridgeReady=()=>Boolean(env.REDPILOT_PUBLISH_URL&&env.REDPILOT_PUBLISH_TOKEN);
@@ -52,6 +54,12 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     r.manualAssets ||= [...(r.assets||[])];
     if(['queued','reading'].includes(r.linkRead?.status))Object.assign(r.linkRead,{status:'failed',error:'服务已重启，请点击重读',readAt:now()});
   }});
+  await store.mutate(s=>{
+    s.creators ||= [];s.creatorSyncs ||= [];s.analysisTasks ||= [];
+    for(const r of s.inspirations)r.creatorIds ||= [];
+    for(const job of s.creatorSyncs)if(activeTask(job)){job.status='failed';job.error='服务已重启，请重新同步';job.completedAt=now();const c=s.creators.find(c=>c.id===job.creatorId);if(c){c.status='failed';c.lastError=job.error;}}
+    for(const task of s.analysisTasks)if(activeTask(task)){task.status='failed';task.error='服务已重启，拆解结果未知；未自动重试';task.completedAt=now();}
+  });
   async function makeDraft(s,referenceId,instruction='',mode='综合借鉴',method='auto',accountId=s.defaultAccountId,productAssetIds,draftMode='image') {
     contentMode(draftMode);
     const account=accountById(s,accountId);
@@ -106,12 +114,57 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     } catch {j.status='uncertain';j.error='发布器请求未完成或返回异常；为防止重复发布，不会自动重发';}
     store.event(s,'publish',`[${j.accountName}] ${j.status==='published'?'已核对发布':'待核对'}：${j.title}`);
   }
-  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),closing=false;
+  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),creatorQueue=Promise.resolve(),analysisQueue=Promise.resolve(),closing=false;
   const readLink=linkReader||((request)=>readReferenceLink(request,env));
-  function queueLinkRead(s,reference) {
+  const readCreator=creatorReader||((request)=>readCreatorFeed(request,env));
+  const queuedCreators=new Set(),queuedAnalyses=new Set();
+  const fingerprint=(r,product)=>createHash('sha256').update(JSON.stringify({title:r.title,text:r.text,note:r.note,tags:r.tags,assets:r.assets,page:r.pageContent&&{kind:r.pageContent.kind,text:r.pageContent.text,assets:r.pageContent.assets},product:product.version})).digest('hex');
+  function queueAnalysis(s,reference,creatorId,force=false) {
+    const creator=creatorById(s,creatorId,true);if(creator.archived||!creator.autoAnalyze)return null;
+    let task=s.analysisTasks.find(t=>t.referenceId===reference.id&&t.creatorId===creatorId&&activeTask(t));if(task)return task;
+    const key=fingerprint(reference,s.product);
+    if(reference.analysis&&reference.analysisFingerprint===key)return null;
+    task=s.analysisTasks.find(t=>t.referenceId===reference.id&&t.creatorId===creatorId&&['blocked','failed'].includes(t.status));
+    if(task?.status==='failed'&&!force)return task;
+    if(!task){task={id:id(),referenceId:reference.id,creatorId,createdAt:now()};s.analysisTasks.unshift(task);}
+    let reason,error;
+    if(!['ready','partial'].includes(reference.linkRead?.status)||reference.pageContent?.kind!=='note'||(!reference.text&&!reference.assets.length)){reason='source_pending';error='等待读取完整笔记后拆解';}
+    else if(!aiReady(env)){reason='ai_unconfigured';error='AI 创作模型未配置；笔记已正常入库';}
+    Object.assign(task,{status:reason?'blocked':'queued',reason:reason||null,error:error||null,sourceFingerprint:key,updatedAt:now()});
+    delete task.completedAt;return task;
+  }
+  function scheduleAnalysis(taskId) {
+    if(queuedAnalyses.has(taskId))return;queuedAnalyses.add(taskId);
+    analysisQueue=analysisQueue.then(async()=>{
+      if(closing)return;
+      try {
+        const request=await store.mutate(s=>{
+          const task=s.analysisTasks.find(t=>t.id===taskId);if(!task||task.status!=='queued')return null;
+          const r=s.inspirations.find(r=>r.id===task.referenceId),creator=s.creators.find(c=>c.id===task.creatorId);
+          if(!r||!creator||creator.archived||!creator.autoAnalyze){Object.assign(task,{status:'blocked',reason:'disabled',error:'自动拆解已关闭，未开始调用 AI'});return null;}
+          if(!aiReady(env)){Object.assign(task,{status:'blocked',reason:'ai_unconfigured',error:'AI 创作模型未配置；笔记已正常入库'});return null;}
+          if(!['ready','partial'].includes(r.linkRead?.status)||r.pageContent?.kind!=='note'){Object.assign(task,{status:'blocked',reason:'source_pending',error:'等待读取完整笔记后拆解'});return null;}
+          const key=fingerprint(r,s.product);
+          if(r.analysis&&r.analysisFingerprint===key){Object.assign(task,{status:'completed',reused:true,completedAt:now()});return null;}
+          task.status='running';task.startedAt=now();task.sourceFingerprint=key;
+          return {reference:structuredClone(r),product:structuredClone(s.product),key};
+        });
+        if(!request)return;
+        const result=await analyze(env,request.reference,await imagesFor(request.reference,root,directory),request.product,fetcher);
+        await store.mutate(s=>{
+          const task=s.analysisTasks.find(t=>t.id===taskId),r=s.inspirations.find(r=>r.id===task?.referenceId);if(!task)return;
+          if(!r||fingerprint(r,s.product)!==request.key){Object.assign(task,{status:'blocked',reason:'source_changed',error:'资料已变化，请重新拆解',completedAt:now()});return;}
+          r.analysis=result;r.analysisFingerprint=request.key;r.method='ai';r.status='analyzed';r.analyzedAt=now();
+          Object.assign(task,{status:'completed',reason:null,error:null,completedAt:now()});store.event(s,'analysis',`自动拆解完成：${r.title}`);
+        });
+      }catch(error){await store.mutate(s=>{const task=s.analysisTasks.find(t=>t.id===taskId);if(task)Object.assign(task,{status:'failed',reason:'provider_error',error:'自动拆解未完成，请检查 AI 配置后重试',completedAt:now()});});}
+    }).catch(error=>console.error('Analysis queue failed:',error.name)).finally(()=>queuedAnalyses.delete(taskId));
+  }
+  function pumpAnalyses(){for(const task of store.state.analysisTasks.filter(t=>t.status==='queued'))scheduleAnalysis(task.id);}
+  function queueLinkRead(s,reference,background=false) {
     if(!reference.url)throw new InputError('这条收藏没有链接');
     if(['queued','reading'].includes(reference.linkRead?.status))return false;
-    if(s.inspirations.filter(r=>['queued','reading'].includes(r.linkRead?.status)).length>=20)throw new InputError('读取任务较多，请稍后再试',409);
+    if(!background&&s.inspirations.filter(r=>['queued','reading'].includes(r.linkRead?.status)).length>=20)throw new InputError('读取任务较多，请稍后再试',409);
     reference.linkRead={status:'queued',attemptId:id(),requestedAt:now(),missing:[]};return true;
   }
   function scheduleLinkRead(referenceId,attemptId) {
@@ -144,9 +197,8 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           else if(raw.author&&typeof raw.author==='object')author=str(raw.author.name||raw.author.nickname||'',500).slice(0,200);
           const resolved=raw.resolvedUrl||raw.canonicalUrl||request.url;
           if(!supportedPageUrl(resolved))throw new InputError('读取结果不是小红书页面');
-          const wanted=new URL(request.url).pathname.match(/\/(?:explore|discovery\/item|user\/profile)\/([a-f\d]{24})/i)?.[1];
-          const actual=new URL(resolved).pathname.match(/\/(?:explore|discovery\/item|user\/profile)\/([a-f\d]{24})/i)?.[1];
-          if(wanted&&wanted.toLowerCase()!==actual?.toLowerCase())throw new InputError('页面内容与收藏链接不匹配');
+          const wanted=noteKey(request.url),actual=noteKey(resolved);
+          if(/^(?:explore|user\/profile):/.test(wanted)&&wanted!==actual)throw new InputError('页面内容与收藏链接不匹配');
           if(!Array.isArray(raw.images||[])||(raw.images||[]).length>9)throw new InputError('网页图片列表不正确');
           const files=(raw.images||[]).map(validateFile);
           if(files.reduce((n,f)=>n+f.buf.length,0)>16*1024*1024)throw new InputError('参考图片超过本次大小限制');
@@ -165,14 +217,96 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           if(missing.length)r.scope+='；'+missing.join('；');
           r.analysis=null;r.method=null;r.status=r.text||r.assets.length?'ready':'needs_source';
           Object.assign(r.linkRead,{status:missing.length||raw.status==='partial'?'partial':'ready',missing,error:null,readAt:now()});
+          for(const creatorId of r.creatorIds||[])queueAnalysis(s,r,creatorId);
           store.event(s,'reading',`已读取收藏：${r.title}`);
         });
+        pumpAnalyses();
       }catch(error){await store.mutate(s=>{
         const r=s.inspirations.find(r=>r.id===referenceId);
         if(r?.linkRead?.attemptId===attemptId)Object.assign(r.linkRead,{status:'failed',error:'链接读取未完成，请稍后重读',readAt:now()});
       });}
     }).catch(error=>console.error('Reader queue failed:',error.name));
   }
+  function scheduleCreatorSync(jobId) {
+    if(queuedCreators.has(jobId))return;queuedCreators.add(jobId);
+    creatorQueue=creatorQueue.then(async()=>{
+      if(closing)return;
+      try {
+        const request=await store.mutate(s=>{
+          const job=s.creatorSyncs.find(j=>j.id===jobId);if(!job||job.status!=='queued')return null;
+          const c=creatorById(s,job.creatorId,true);
+          if(c.archived){Object.assign(job,{status:'failed',error:'博主已归档，未继续同步',completedAt:now()});return null;}
+          job.status='running';job.startedAt=now();c.status='syncing';
+          return c.profileUrl?{profileUrl:c.profileUrl}:{handle:c.handle};
+        });
+        if(!request)return;
+        const raw=await readCreator(request);
+        const reads=await store.mutate(s=>{
+          const job=requireItem(s.creatorSyncs,jobId),c=creatorById(s,job.creatorId,true);
+          if(c.archived){Object.assign(job,{status:'failed',error:'博主已归档，未继续同步',completedAt:now()});return [];}
+          if(!raw||!['ready','partial','needs_login','blocked','unavailable','needs_selection'].includes(raw.status))throw new InputError('博主读取器没有返回有效结果');
+          if(!['ready','partial'].includes(raw.status)){
+            const errors={needs_login:'请在 Chrome 登录小红书后同步',blocked:'请在 Chrome 处理页面验证后同步',unavailable:'暂时无法读取博主主页，请稍后重试',needs_selection:'没有找到小红书号完全匹配的博主，请使用主页链接添加'};
+            c.status=raw.status;c.lastError=errors[raw.status];c.lastSyncAt=now();c.lastSync={added:0,discovered:0,at:c.lastSyncAt,status:'failed'};
+            Object.assign(job,{status:'failed',error:c.lastError,completedAt:now()});return [];
+          }
+          const profile=raw.profile||{},identity=normalizeCreatorInput({profileUrl:profile.profileUrl});
+          if(!identity.id||identity.id!==String(profile.id||'').toLowerCase()||(c.profileId&&c.profileId!==identity.id))throw new InputError('读取的博主与目标主页不一致');
+          if(!c.profileId&&request.handle&&String(profile.handle||'').toLowerCase()!==request.handle.toLowerCase())throw new InputError('小红书号没有完全匹配，未导入笔记');
+          if(s.creators.some(other=>other.id!==c.id&&!other.archived&&other.profileId===identity.id)){c.enabled=false;c.status='needs_selection';c.lastError='这个博主已在列表中，请使用已有记录';Object.assign(job,{status:'failed',error:c.lastError,completedAt:now()});return [];}
+          const canonical=new URL(identity.profileUrl);canonical.search='';canonical.hash='';
+          Object.assign(c,{profileId:identity.id,profileUrl:canonical.href,name:str(profile.name||profile.handle||c.name,200,true),handle:str(profile.handle||c.handle||'',100)});
+          if(!Array.isArray(raw.notes))throw new InputError('博主笔记列表格式不正确');
+          const notes=[],unique=new Set();
+          for(const source of raw.notes.slice(0,50)){
+            if(!source||typeof source.url!=='string'||!supportedPageUrl(source.url))continue;
+            const key=noteKey(source.url);if(!key?.startsWith('explore:'))continue;
+            const externalId=key.slice(8);if(source.id&&String(source.id).toLowerCase()!==externalId)continue;
+            const owner=new URL(source.url).pathname.match(/^\/user\/profile\/([a-f\d]{24})\/[a-f\d]{24}/i)?.[1];
+            if(owner&&owner.toLowerCase()!==identity.id)continue;
+            if(unique.has(externalId))continue;unique.add(externalId);
+            notes.push({id:externalId,url:sourceUrl(source.url),title:typeof source.title==='string'?source.title.slice(0,160):'',pinned:source.pinned===true});
+          }
+          const seen=new Set(c.seenNoteIds||[]),first=!c.baselineAt;
+          const ordered=first?[...notes.filter(n=>!n.pinned),...notes.filter(n=>n.pinned)]:notes;
+          const candidates=ordered.filter(n=>!seen.has(n.id)),selected=candidates.slice(0,first?10:20),selectedIds=new Set(selected.map(n=>n.id));
+          const readRequests=[];let added=0;
+          for(const note of notes){
+            let r=s.inspirations.find(r=>noteKey(r.url)===`explore:${note.id}`||r.canonicalUrl&&noteKey(r.canonicalUrl)===`explore:${note.id}`);
+            if(!r&&!selectedIds.has(note.id))continue;
+            if(!r){r={id:id(),title:note.title||'未命名灵感',url:note.url,note:'',text:'',tags:[],assets:[],manualAssets:[],hashes:[],userFields:{title:false,text:false,tags:false},pool:true,status:'needs_source',uses:0,createdAt:now(),creatorIds:[]};s.inspirations.unshift(r);added++;}
+            r.creatorIds ||= [];if(!r.creatorIds.includes(c.id))r.creatorIds.push(c.id);
+            // Full note links from this scan carry fresh platform parameters. They
+            // supplement the saved source; titles and handwritten text stay intact.
+            r.latestCreatorUrl=note.url;
+            if(selectedIds.has(note.id)||seen.has(note.id)){
+              if(!r.pageContent||r.pageContent.kind!=='note'||!['ready','partial'].includes(r.linkRead?.status)){
+                if(!['queued','reading'].includes(r.linkRead?.status)){r.url=note.url;queueLinkRead(s,r,true);readRequests.push({id:r.id,attemptId:r.linkRead.attemptId});}
+              }
+              if(c.autoAnalyze)queueAnalysis(s,r,c.id);
+              seen.add(note.id);
+            }
+          }
+          if(first&&(notes.length||raw.status==='ready')){for(const n of notes)seen.add(n.id);c.baselineAt=now();}
+          c.seenNoteIds=[...seen].slice(-5000);c.importedCount=(c.importedCount||0)+added;c.lastSyncAt=now();c.lastError=null;c.status=c.enabled?'idle':'paused';
+          const deferred=!first&&candidates.length>selected.length;
+          const status=raw.status==='partial'||raw.scan?.limitReached||deferred?'partial':'completed';
+          c.lastSync={added,discovered:notes.length,at:now(),status,deferred:deferred?candidates.length-selected.length:0,scan:{complete:false,limitReached:raw.scan?.limitReached===true}};
+          const missing=Array.isArray(raw.missing)?raw.missing.slice(0,19).map(x=>String(x).slice(0,500)):[];
+          if(deferred)missing.push('本次最多导入20篇新发现笔记，其余留待下次同步');
+          Object.assign(job,{status,added,discovered:notes.length,missing,completedAt:now()});
+          store.event(s,'creator',`[${c.name}] 同步完成，新增 ${added} 篇`);return readRequests;
+        });
+        for(const r of reads)scheduleLinkRead(r.id,r.attemptId);
+        pumpAnalyses();
+      }catch(error){await store.mutate(s=>{
+        const job=s.creatorSyncs.find(j=>j.id===jobId);if(!job)return;
+        Object.assign(job,{status:'failed',error:'同步未完成，请检查博主主页后重试',completedAt:now()});
+        const c=s.creators.find(c=>c.id===job.creatorId);if(c&&!c.archived){c.status='failed';c.lastError=job.error;c.lastSyncAt=now();c.lastSync={added:0,discovered:0,at:c.lastSyncAt,status:'failed'};}
+      });}
+    }).catch(error=>console.error('Creator queue failed:',error.name)).finally(()=>queuedCreators.delete(jobId));
+  }
+  function pumpCreatorSyncs(){for(const job of store.state.creatorSyncs.filter(j=>j.status==='queued'))scheduleCreatorSync(job.id);}
   function scheduleImage(jobId) {
     imageQueue=imageQueue.then(async()=>{
       if(closing)return;
@@ -245,6 +379,14 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   async function tick(date=new Date()) {
     if(ticking)return;ticking=true;
     try {await store.mutate(async s=>{
+      for(const c of s.creators.filter(c=>c.enabled&&!c.archived)){
+        const p=dateParts(date,c.timezone),key=dailyKey(date,c.timezone);
+        if(`${p.hour}:${p.minute}`>=c.time&&c.lastDailyKey!==key){c.lastDailyKey=key;queueCreatorSync(s,c.id,'daily');}
+      }
+      if(aiReady(env))for(const task of s.analysisTasks.filter(t=>t.status==='blocked'&&t.reason==='ai_unconfigured')){
+        const r=s.inspirations.find(r=>r.id===task.referenceId),c=s.creators.find(c=>c.id===task.creatorId);
+        if(r&&c?.autoAnalyze&&!c.archived)queueAnalysis(s,r,c.id);
+      }
       for(const account of s.accounts.filter(item=>item.enabled&&!item.archived)) {
         const setting=account.settings,p=dateParts(date,setting.timezone),key=dailyKey(date,setting.timezone);
         if(!setting.enabled||`${p.hour}:${p.minute}`<setting.time||account.lastDailyKey===key)continue;
@@ -266,7 +408,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
       syncDefaultSettings(s);
       for(const j of s.jobs.filter(j=>j.status==='scheduled'&&new Date(j.scheduledAt)<=date))await dispatch(s,j);
-    });} finally {ticking=false;}
+    });pumpCreatorSyncs();pumpAnalyses();} finally {ticking=false;}
   }
   const server=http.createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Frame-Options','DENY');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
@@ -329,6 +471,20 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         }
         const b=await body(req);
         const result=await store.mutate(async s=>{
+          if(req.method==='POST'&&pathname==='/api/creators'){
+            const creator=createCreator(s,b);queueCreatorSync(s,creator.id,'initial');store.event(s,'creator','已添加参考博主');return creator;
+          }
+          const creatorRoute=pathname.match(/^\/api\/creators\/([^/]+)(?:\/(sync|archive|analyze-pending))?$/);
+          if(creatorRoute){const c=creatorById(s,creatorRoute[1]),action=creatorRoute[2];
+            if(req.method==='PUT'&&!action){const updated=updateCreator(s,c.id,b);if(updated.autoAnalyze)for(const r of s.inspirations.filter(r=>r.creatorIds?.includes(c.id)))queueAnalysis(s,r,c.id);return updated;}
+            if(req.method==='POST'&&action==='sync'){return queueCreatorSync(s,c.id,'manual');}
+            if(req.method==='POST'&&action==='archive'){return archiveCreator(s,c.id);}
+            if(req.method==='POST'&&action==='analyze-pending'){
+              if(!c.autoAnalyze)throw new InputError('请先开启这个博主的自动拆解',409);
+              for(const r of s.inspirations.filter(r=>r.creatorIds?.includes(c.id)))queueAnalysis(s,r,c.id,true);
+              return {ok:true};
+            }
+          }
           if(req.method==='POST'&&pathname==='/api/image-jobs') {
             const request=validateImageRequest(b,s.productAssets);
             if(!imageProviderStatus(env).ready)throw new InputError('尚未配置 OpenAI 图片 API，请在服务器环境中配置密钥后重启',409);
@@ -383,7 +539,12 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(req.method==='DELETE'){s.inspirations=s.inspirations.filter(x=>x.id!==r.id);return {ok:true};}
             if(req.method==='PUT'){if('pool'in b)r.pool=Boolean(b.pool);if('title'in b){const value=str(b.title,160,true);if(value!==r.title)r.userFields.title=true;r.title=value;}if('tags'in b){const value=lines(b.tags,10);if(JSON.stringify(value)!==JSON.stringify(r.tags))r.userFields.tags=true;r.tags=value;}return r;}
             if(req.method==='POST'&&m[2]==='read-link'){queueLinkRead(s,r);return r;}
-            if(req.method==='POST'&&m[2]==='analyze'){r.analysis=await analyze(env,r,await imagesFor(r,root,directory),s.product,fetcher);r.status='analyzed';r.method='ai';r.analyzedAt=now();store.event(s,'analysis',`完成参考分析：${r.title}`);return r;}
+            if(req.method==='POST'&&m[2]==='analyze'){
+              if(s.analysisTasks.some(t=>t.referenceId===r.id&&activeTask(t)))throw new InputError('这条笔记正在自动拆解，请等待完成',409);
+              r.analysis=await analyze(env,r,await imagesFor(r,root,directory),s.product,fetcher);r.analysisFingerprint=fingerprint(r,s.product);r.status='analyzed';r.method='ai';r.analyzedAt=now();
+              for(const task of s.analysisTasks.filter(t=>t.referenceId===r.id&&['failed','blocked'].includes(t.status)))Object.assign(task,{status:'completed',reused:true,resolvedBy:'manual',reason:null,error:null,sourceFingerprint:r.analysisFingerprint,completedAt:now()});
+              store.event(s,'analysis',`完成参考分析：${r.title}`);return r;
+            }
           }
           if(req.method==='POST'&&pathname==='/api/drafts'){return makeDraft(s,b.referenceId,str(b.instruction||'',2000),str(b.mode||'综合借鉴',80),b.method||'auto',b.accountId||s.defaultAccountId,b.productAssetIds,b.contentMode);}
           m=pathname.match(/^\/api\/drafts\/([^/]+)(?:\/(approve|schedule|duplicate))?$/);
@@ -404,6 +565,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           throw new InputError('接口不存在',404);
         });if(req.method==='POST'&&/^\/api\/product-assets\/[^/]+\/render$/.test(pathname))scheduleRender(result.id);if(req.method==='POST'&&pathname==='/api/image-jobs')scheduleImage(result.id);
         const reading=result.item||result;if(req.method==='POST'&&reading.linkRead?.status==='queued'&&(pathname==='/api/inspirations'||/^\/api\/inspirations\/[^/]+\/read-link$/.test(pathname)))scheduleLinkRead(reading.id,reading.linkRead.attemptId);
+        if(pathname.startsWith('/api/creators')){pumpCreatorSyncs();pumpAnalyses();}
         return json(res,result);
       }
       if(req.method!=='GET'&&req.method!=='HEAD')throw new InputError('请求不支持',405);
@@ -416,7 +578,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,readerQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
+  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);
