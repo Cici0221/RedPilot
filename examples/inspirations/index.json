@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "seed_data_note": "根据本聊天用户提供的截图及此前实际浏览结果建立的本地样例记录。尚未实现上传界面、自动分析服务或每日发布服务。",
+  "items": [
+    {
+      "id": "ref-tayumon-profile",
+      "kind": "account_reference",
+      "title": "TAYUMON全球销售 账号风格",
+      "source": "user_uploaded_screenshot",
+      "asset": "assets/tayumon-profile.jpg",
+      "profile_url": "https://www.xiaohongshu.com/user/profile/60d9fea1000000002002dd13",
+      "tags": [
+        "通信硬件",
+        "账号定位",
+        "大字封面",
+        "场景切入"
+      ],
+      "analysis_scope": "用户截图内可见的主页介绍、两张完整封面及部分下方内容；另有已完成的主页浏览记录。",
+      "analysis": {
+        "positioning": "围绕苹果手机通信困扰提供外置设备方案。",
+        "visible_cover_patterns": [
+          "深色生活或桌面背景",
+          "高对比的大字问题",
+          "亮色突出解决方向",
+          "设备与手机组合呈现"
+        ],
+        "adaptation": "SimHelper 可学习问题先行、标题清晰和关系图解；品牌与产品呈现使用自己的素材。",
+        "unknown_from_screenshot": [
+          "完整笔记正文",
+          "视频脚本与画面",
+          "发布频率",
+          "曝光与转化效果"
+        ]
+      },
+      "eligible_for_topic_pool": true,
+      "generated_draft_ids": [],
+      "published_uses": 0,
+      "asset_sha256": "8a1510f9701248e155723d01053083cb123d166ab2aa02829e749e66de87eada",
+      "asset_dimensions": {
+        "width": 1280,
+        "height": 2781
+      }
+    },
+    {
+      "id": "ref-tayumon-light-travel",
+      "kind": "post_reference",
+      "title": "买它的人，其实只是想少带一台手机",
+      "source": "previous_browser_read",
+      "source_url": "https://www.xiaohongshu.com/explore/6a95c0ff000000002902de43",
+      "read_on": "2026-10-25",
+      "available_evidence": [
+        "笔记正文",
+        "当前加载的部分评论",
+        "封面"
+      ],
+      "tags": [
+        "备用号码",
+        "需求解释",
+        "场景文案"
+      ],
+      "analysis": {
+        "topic_angle": "从维护备用机的麻烦解释独立通信设备的价值。",
+        "structure": [
+          "提出常见替代方案",
+          "列出具体生活负担",
+          "解释产品的存在理由",
+          "说明适用人群",
+          "用场景问题结尾"
+        ],
+        "adaptation": "改从旧手机里真正需要保留的功能切入，解释 SimHelper 的使用路径和当前条件。",
+        "do_not_transfer": [
+          "竞品多卡能力",
+          "海外费用结论",
+          "买家体验与销量",
+          "竞品产品图"
+        ]
+      },
+      "eligible_for_topic_pool": true,
+      "generated_draft_ids": [
+        "inspiration-demo-001"
+      ],
+      "published_uses": 0
+    }
+  ]
+}

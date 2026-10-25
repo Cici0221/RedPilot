@@ -1,0 +1,27 @@
+{
+  "id": "inspiration-demo-001",
+  "status": "unpublished_editorial_sample",
+  "creation_method": "本聊天内人工组织的示例，用于说明参考分析到成稿的数据格式，尚非平台自动运行结果。",
+  "reference_ids": ["ref-tayumon-light-travel"],
+  "reference_mode": "学习文案结构",
+  "adaptation": "沿用从生活困扰到使用路径再到适用条件的论述顺序，用备用机里需要保留的功能作为新的切入点。",
+  "product_sources": [
+    "https://cybertronics.feishu.cn/docx/H6D9dcE0holeDFxf6kGcuzNWnId",
+    "https://cybertronics.feishu.cn/docx/U0xjdGIFOo7cDIxxeJ3cVxpinzc"
+  ],
+  "title_options": ["备用机里，真正要留下的是什么？", "留着旧号，就得留着旧手机？", "你养的备用机，平时到底在忙什么？"],
+  "selected_title": "备用机里，真正要留下的是什么？",
+  "body": "那台旧手机，你上次给它充电是什么时候？\n\n如果它平时很少被拿起来，只是为了留住一个旧号、收几条短信，偶尔接个电话，我们想先弄清楚：你需要的是一整台备用机，还是这个号码上的联络？\n\n这也是我们开发 SimHelper 的一个出发点。\n\n把希望管理的备用 SIM 移入独立设备，在常用手机的 App／网页上查看短信，通过 App 远程接听。忙的时候，可以让预设的 AI 助理先接待，需要时由本人接管。\n\n它目前处于工程样机／开发内测阶段。当前电话音频要求设备连接 Wi-Fi，常用手机需要互联网；原来的 SIM 也必须移入设备。\n\n如果你的备用机还要用来拍照、导航或运行其他 App，那些需求需要另外考虑。\n\n我们想听听你的实际情况：备用机里，你最想保留下来的究竟是什么？",
+  "tags": ["备用手机", "备用号码", "AI电话助理", "产品开发", "人类补丁"],
+  "slides": [
+    {"page": 1, "role": "封面", "headline": ["留着旧号", "就得留着", "旧手机？"], "visual": "大字问句与原创SIM关系示意，采用自有品牌落款。"},
+    {"page": 2, "role": "具体困扰", "headline": "你要保留的是哪一部分？", "body": ["旧号上的短信", "工作号码的来电", "还是整台手机的其他功能？"], "visual": "三个文字分区，明确是需求提问。"},
+    {"page": 3, "role": "产品路径", "headline": "把号码的联络放回常用设备", "body": ["SIM移入独立硬件", "短信在App／网页查看", "电话通过App接听"], "visual": "SIM→固定设备→常用手机；标记关系示意。"},
+    {"page": 4, "role": "使用条件", "headline": "这几个条件先讲清", "body": ["SIM需要移入设备", "当前电话音频要求设备连接Wi-Fi", "常用手机需要互联网", "当前为工程样机／开发内测"], "visual": "清晰的文字说明，不使用竞品设备图。"},
+    {"page": 5, "role": "需求收集", "headline": "你最想留下什么？", "body": ["收短信", "接电话", "其他用途", "只描述场景，不用公开手机号。"], "visual": "品牌默认绿色提问页。"}
+  ],
+  "rendered_images": [],
+  "production_state": "文字与内页分镜已完成，未渲染本条完整图集。",
+  "publish_state": "not_scheduled",
+  "open_checks": ["发布前核对产品文档是否有更新", "完成并检查本条图集"]
+}
