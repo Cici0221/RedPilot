@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#007aff">
+  <title>登录 · RedPilot 薯航</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/login.js"></script>
+</head>
+<body class="login-page">
+  <main class="login-layout">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="login-brand"><span class="brand-symbol" aria-hidden="true">↗</span><span class="brand-name">RedPilot<span class="brand-cn">薯航</span></span></div>
+      <h1 id="login-title">登录</h1>
+      <form id="login-form">
+        <div class="field"><label for="login-email">邮箱</label><input id="login-email" name="email" type="email" autocomplete="username" inputmode="email" maxlength="254" autocapitalize="none" spellcheck="false" required></div>
+        <div class="field"><label for="login-password">密码</label><div class="password-control"><input id="login-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required><button id="password-toggle" type="button" aria-controls="login-password" aria-label="显示密码" aria-pressed="false">显示</button></div></div>
+        <p id="login-error" class="login-error" role="alert" aria-live="polite" hidden></p>
+        <button id="login-submit" class="btn login-submit" type="submit" disabled>登录</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

@@ -4,9 +4,32 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../app/server.mjs';
+import { configureAuth } from '../app/auth.mjs';
+import { randomBytes } from 'node:crypto';
 import { noteKey, dailyKey } from '../app/content.mjs';
 const root = path.resolve(import.meta.dirname,'..');
-async function fixture(t,env={},fetcher){const directory=await mkdtemp(path.join(os.tmpdir(),'redpilot-test-'));const app=await createApp({root,directory,env,fetcher});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${app.server.address().port}`;t.after(async()=>{await app.close();await rm(directory,{recursive:true,force:true});});return {...app,base,directory,async request(url,data,method='POST',extra={}){const r=await fetch(base+'/api/'+url,{method,headers:{Origin:base,'Content-Type':'application/json',...extra},...(data!==undefined?{body:JSON.stringify(data)}:{})});return {status:r.status,data:await r.json()};}};}
+async function fixture(t, env = {}, fetcher) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'redpilot-test-'));
+  const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
+  await configureAuth({ directory, ...credentials });
+  const app = await createApp({ root, directory, env, fetcher });
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
+  const login = await fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify(credentials)
+  });
+  assert.equal(login.status, 200, 'fixture login failed');
+  const cookie = login.headers.get('set-cookie')?.split(';')[0];
+  assert.ok(cookie, 'fixture session cookie missing');
+  return { ...app, base, cookie, directory, async request(url, data, method = 'POST', extra = {}) {
+    const response = await fetch(base + '/api/' + url, {
+      method, headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json', ...extra },
+      ...(data !== undefined ? { body: JSON.stringify(data) } : {})
+    });
+    return { status: response.status, data: await response.json() };
+  } };
+}
 async function getState(f){return (await f.request('state',undefined,'GET')).data;}
 async function approve(f){const d=(await getState(f)).drafts[0];const r=await f.request(`drafts/${d.id}/approve`,{});assert.equal(r.status,200,JSON.stringify(r));return d;}
 async function enqueue(f,d){const r=await f.request(`drafts/${d.id}/schedule`,{scheduledAt:new Date(Date.now()+3600000).toISOString()});assert.equal(r.status,200,JSON.stringify(r));await f.store.mutate(s=>{s.jobs[0].scheduledAt=new Date(Date.now()-60000).toISOString();});return r.data;}
@@ -14,10 +37,10 @@ const bridgeEnv={REDPILOT_PUBLISH_URL:'https://publisher.example/publish',REDPIL
 const aiEnv={REDPILOT_AI_KEY:'test-key',REDPILOT_AI_MODEL:'test-vision',REDPILOT_AI_BASE_URL:'https://model.example/v1'};
 const noteUrl='https://www.xiaohongshu.com/explore/6a95c0ff000000002902de43';
 const fakeImage={name:'tiny.png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ioAAAAASUVORK5CYII='};
-test('initial state truthfully declares disconnected integrations and no published jobs',async t=>{const f=await fixture(t);const s=await getState(f);assert.equal(s.capabilities.ai,false);assert.equal(s.capabilities.publisher,false);assert.equal(s.jobs.length,0);assert.equal(s.settings.enabled,false);assert.equal(s.product.name,'SimHelper');assert.ok(s.inspirations[0].assets.length);assert.ok(!(JSON.stringify(s).includes('test-token')));const r=await fetch(f.base+'/');assert.equal(r.status,200);assert.match(await r.text(),/RedPilot/);});
+test('initial state truthfully declares disconnected integrations and no published jobs',async t=>{const f=await fixture(t);const s=await getState(f);assert.equal(s.capabilities.ai,false);assert.equal(s.capabilities.publisher,false);assert.equal(s.jobs.length,0);assert.equal(s.settings.enabled,false);assert.equal(s.product.name,'SimHelper');assert.ok(s.inspirations[0].assets.length);assert.ok(!(JSON.stringify(s).includes('test-token')));const r=await fetch(f.base+'/',{headers:{Cookie:f.cookie}});assert.equal(r.status,200);assert.match(await r.text(),/RedPilot/);});
 test('rejects cross-origin mutations and unapproved hosts',async t=>{const f=await fixture(t);const r=await f.request('drafts',{},'POST',{Origin:'https://evil.example'});assert.equal(r.status,403);const attack=await new Promise(resolve=>{import('node:http').then(({request})=>{const req=request(f.base+'/api/state',{headers:{Host:'evil.example'}},res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});req.end();});});assert.equal(attack,403);const invalid=await f.request('inspirations',{title:'x',url:'javascript:alert(1)',files:[]});assert.equal(invalid.status,400);});
 test('a URL-only reference is retained and cannot be analyzed as if fetched',async t=>{const f=await fixture(t,aiEnv,()=>{throw Error('must not fetch');});const r=await f.request('inspirations',{title:'收藏',url:'https://www.xiaohongshu.com/explore/6a95c0ff000000002902de44',files:[]});assert.equal(r.status,200);assert.equal(r.data.item.status,'needs_source');const analysis=await f.request(`inspirations/${r.data.item.id}/analyze`,{});assert.equal(analysis.status,409);assert.match(analysis.data.error,/尚未读取网页/);});
-test('deduplicates note IDs with differing token parameters and screenshot hashes',async t=>{const f=await fixture(t);const r=await f.request('inspirations',{title:'截图组',url:noteUrl+'?xsec_token=one',files:[fakeImage]});assert.equal(r.status,200);const key=r.data.item.id;assert.equal(r.data.merged,true);const second=await f.request('inspirations',{title:'另一个标题',url:noteUrl+'?xsec_token=two',files:[fakeImage,fakeImage],text:'新正文'});assert.equal(second.data.item.id,key);assert.equal(second.data.item.hashes.length,1);assert.equal(second.data.item.assets.length,1);assert.equal(second.data.item.analysis,null);const r3=await f.request('inspirations',{title:'相同截图',files:[fakeImage]});assert.equal(r3.data.item.id,key);assert.equal((await getState(f)).inspirations.length,2);const img=await fetch(f.base+second.data.item.assets[0]);assert.equal(img.headers.get('content-type'),'image/png');});
+test('deduplicates note IDs with differing token parameters and screenshot hashes',async t=>{const f=await fixture(t);const r=await f.request('inspirations',{title:'截图组',url:noteUrl+'?xsec_token=one',files:[fakeImage]});assert.equal(r.status,200);const key=r.data.item.id;assert.equal(r.data.merged,true);const second=await f.request('inspirations',{title:'另一个标题',url:noteUrl+'?xsec_token=two',files:[fakeImage,fakeImage],text:'新正文'});assert.equal(second.data.item.id,key);assert.equal(second.data.item.hashes.length,1);assert.equal(second.data.item.assets.length,1);assert.equal(second.data.item.analysis,null);const r3=await f.request('inspirations',{title:'相同截图',files:[fakeImage]});assert.equal(r3.data.item.id,key);assert.equal((await getState(f)).inspirations.length,2);const img=await fetch(f.base+second.data.item.assets[0],{headers:{Cookie:f.cookie}});assert.equal(img.headers.get('content-type'),'image/png');});
 test('invalid image signatures and upload groups are rejected without creating records',async t=>{const f=await fixture(t);for(const files of [[{name:'evil.png',data:Buffer.from('<svg onload="alert(1)">').toString('base64')}],Array(7).fill(fakeImage)]){const r=await f.request('inspirations',{title:'bad',files});assert.equal(r.status,400);}assert.equal((await getState(f)).inspirations.length,2);});
 test('template creation, editing and version history persist across store reopening',async t=>{const f=await fixture(t);const r=await f.request('drafts',{method:'template',instruction:'写一个开会场景'});assert.equal(r.status,200);assert.equal(r.data.method,'template');assert.match(r.data.adaptation,/尚未用 AI/);const updated={...r.data,title:'今天的通信小麻烦'};const saved=await f.request(`drafts/${r.data.id}`,updated,'PUT');assert.equal(saved.data.history.length,1);assert.equal(saved.data.revision,2);const disk=JSON.parse(await readFile(path.join(f.directory,'state.json')));assert.equal(disk.drafts[0].title,updated.title);const {createStore}=await import('../app/store.mjs');await f.store.close();const reopened=await createStore(root,f.directory);assert.equal(reopened.state.drafts[0].history[0].title,r.data.title);await reopened.close();});
 test('changed product facts invalidate approvals and block existing schedules',async t=>{const f=await fixture(t,bridgeEnv,()=>{throw Error('must not publish');});const d=await approve(f);await enqueue(f,d);const s=await getState(f);const changed=await f.request('product',{...s.product,summary:'更新后的产品说明'},'PUT');assert.equal(changed.status,200);assert.equal((await getState(f)).drafts[0].approved,false);await f.tick();const state=await getState(f);assert.equal(state.jobs[0].status,'blocked');assert.match(state.jobs[0].error,/产品资料已更新/);});

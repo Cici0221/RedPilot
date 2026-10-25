@@ -4,6 +4,8 @@ import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, access, realpath } fr
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../app/server.mjs';
+import { configureAuth } from '../app/auth.mjs';
+import { randomBytes } from 'node:crypto';
 
 const root = path.resolve(import.meta.dirname, '..');
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ioAAAAASUVORK5CYII=', 'base64');
@@ -16,14 +18,26 @@ async function fixture(t, { renderRunner, fetcher, beforeClose } = {}) {
   const runtime = path.join(directory, 'runtime');
   const source = path.join(directory, 'source');
   await mkdir(source);
+  const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
+  await configureAuth({ directory: runtime, ...credentials });
   let app = await createApp({ root, directory: runtime, env: {}, renderRunner, fetcher });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let base = `http://127.0.0.1:${app.server.address().port}`;
+  let cookie;
+  async function login() {
+    const response = await fetch(base + '/api/auth/login', {
+      method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify(credentials)
+    });
+    assert.equal(response.status, 200, 'fixture login failed');
+    cookie = response.headers.get('set-cookie')?.split(';')[0];
+    assert.ok(cookie, 'fixture session cookie missing');
+  }
   t.after(async () => {
     beforeClose?.();
     await app.close();
     await rm(directory, { recursive: true, force: true });
   });
+  await login();
   return {
     runtime, source, get store() { return app.store; },
     async local(name, bytes) {
@@ -36,17 +50,18 @@ async function fixture(t, { renderRunner, fetcher, beforeClose } = {}) {
       app = await createApp({ root, directory: runtime, env: {}, renderRunner, fetcher });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
       base = `http://127.0.0.1:${app.server.address().port}`;
+      await login();
     },
     async request(url, data, method = 'POST') {
       const response = await fetch(base + '/api/' + url, {
-        method, headers: { Origin: base, 'Content-Type': 'application/json' },
+        method, headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' },
         ...(data !== undefined ? { body: JSON.stringify(data) } : {})
       });
       return { status: response.status, data: await response.json() };
     },
     async file(url) {
       assert.match(url, /^\/api\/product-assets\/[^/]+\/file(?:\?.*)?$/);
-      const response = await fetch(base + url);
+      const response = await fetch(base + url, { headers: { Cookie: cookie } });
       return { status: response.status, type: response.headers.get('content-type'), bytes: Buffer.from(await response.arrayBuffer()) };
     }
   };

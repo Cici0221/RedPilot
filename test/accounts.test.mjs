@@ -4,6 +4,8 @@ import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../app/server.mjs';
+import { configureAuth } from '../app/auth.mjs';
+import { randomBytes } from 'node:crypto';
 
 const root = path.resolve(import.meta.dirname, '..');
 const noteUrl = 'https://www.xiaohongshu.com/explore/6a95c0ff000000002902de43';
@@ -21,13 +23,25 @@ const aiEnv = {
 async function fixture(t, { env = {}, fetcher, legacy } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'redpilot-accounts-'));
   if (legacy) await writeFile(path.join(directory, 'state.json'), JSON.stringify(legacy));
+  const credentials = { email: 'fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
+  await configureAuth({ directory: directory, ...credentials });
   let app = await createApp({ root, directory, env, fetcher });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let base = `http://127.0.0.1:${app.server.address().port}`;
+  let cookie;
+  async function login() {
+    const response = await fetch(base + '/api/auth/login', {
+      method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify(credentials)
+    });
+    assert.equal(response.status, 200, 'fixture login failed');
+    cookie = response.headers.get('set-cookie')?.split(';')[0];
+    assert.ok(cookie, 'fixture session cookie missing');
+  }
   t.after(async () => {
     await app.close();
     await rm(directory, { recursive: true, force: true });
   });
+  await login();
   return {
     get store() { return app.store; },
     tick: date => app.tick(date),
@@ -37,11 +51,12 @@ async function fixture(t, { env = {}, fetcher, legacy } = {}) {
       app = await createApp({ root, directory, env, fetcher });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
       base = `http://127.0.0.1:${app.server.address().port}`;
+      await login();
     },
     async request(url, data, method = 'POST') {
       const response = await fetch(base + '/api/' + url, {
         method,
-        headers: { Origin: base, 'Content-Type': 'application/json' },
+        headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' },
         ...(data !== undefined ? { body: JSON.stringify(data) } : {})
       });
       return { status: response.status, data: await response.json() };

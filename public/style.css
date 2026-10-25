@@ -101,3 +101,29 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 @media(max-width:1150px){.product-asset-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:760px){.product-asset-grid{gap:12px}.asset-preview{height:155px;padding:12px}.asset-card-body{padding:13px}.asset-card-title{flex-wrap:wrap;gap:3px}.asset-card-title h3{font-size:12px}.asset-file-meta{font-size:9px}.asset-render{flex-wrap:wrap;gap:7px}.asset-render>select{flex-basis:100%;width:100%}.asset-render>.btn{width:100%;font-size:10px}.asset-storage-note{font-size:9px}.asset-card-actions .btn{font-size:10px}.product-tabs{margin-bottom:18px}.product-tabs>button{font-size:11px}.asset-filters{gap:3px}.asset-filters .filter{padding:8px 10px}.asset-filters .shared-note{width:auto;margin:0 0 0 auto}.asset-placeholder>svg{width:34px;height:34px}}
 @media(max-width:420px){.asset-filters .filter{padding:8px}.asset-card-actions{align-items:start;gap:8px;flex-wrap:wrap}.asset-card-title .badge{font-size:8px}.asset-preview{height:138px}}
+
+/* Sign-in and current session. */
+.login-layout{min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:28px 20px}
+.login-card{width:100%;max-width:390px;background:#fff;border:1px solid #e4e9f1;border-radius:15px;padding:32px;box-shadow:0 8px 35px #27466d06}
+.login-brand{display:flex;align-items:center;gap:11px;margin-bottom:33px}
+.login-brand>.brand-name{font-size:24px;line-height:1}
+.login-brand .brand-cn{display:inline-block;margin:0 0 0 10px;letter-spacing:2px;font-size:11px}
+.login-card h1{font-size:23px;letter-spacing:-.4px;font-weight:600;margin-bottom:25px}
+.login-card .field{margin-bottom:19px}
+.login-card .field>label{font-size:12px}
+.login-card input{font-size:14px;padding:11px 12px}
+.password-control{position:relative}
+.password-control input{padding-right:64px}
+.password-control button{position:absolute;right:6px;top:50%;transform:translateY(-50%);padding:7px 10px;background:none;color:#8fa3be;font-size:11px;border-radius:4px}
+.password-control button:hover{color:#007aff}
+.login-submit{width:100%;font-size:13px;margin-top:5px;min-height:42px}
+.login-submit:disabled{cursor:default}
+.login-error{font-size:11px;line-height:1.8;color:#ad7553;background:#fff7ed;border:1px solid #f5e5d0;border-radius:7px;padding:9px 11px;margin:3px 0 14px}
+.login-error[hidden]{display:none}
+.sidebar-auth{padding:17px 12px 0}
+.sidebar-auth .btn{font-size:11px;color:#8fa0b6;padding:5px 0;background:none}
+.sidebar-auth .btn:hover{color:#007aff;background:none}
+.session-user{display:flex;align-items:center;gap:12px;border-bottom:1px solid #edf0f4;padding:0 0 15px;margin-bottom:3px;min-width:0}
+.session-user span{font-size:10px;color:#a3aebf;flex-shrink:0}
+.session-user strong{font-size:11px;font-weight:400;color:#8395ae;overflow-wrap:anywhere}
+@media(max-width:760px){.sidebar-auth{position:absolute;top:16px;right:20px;padding:0}.sidebar-auth .btn{font-size:10px}.login-card{max-width:370px;padding:28px}.login-card input{font-size:16px}.login-layout{padding:24px}.login-brand{margin-bottom:29px}}

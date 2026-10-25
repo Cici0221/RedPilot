@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { createStore } from './store.mjs';
+import { createAuth } from './auth.mjs';
 import { id, now, InputError, str, lines, sourceUrl, noteKey, validateProduct, validateDraft, checks, templateDraft, dateParts, dailyKey } from './content.mjs';
 import { aiReady, analyze, generate, imagesFor } from './ai.mjs';
 import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError } from './product-assets.mjs';
@@ -16,9 +17,10 @@ const MAX_BODY = 30*1024*1024;
 const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.ttf':'font/ttf'};
 function requireItem(array,key) { const item = array.find(x=>x.id===key); if(!item) throw new InputError('记录不存在',404); return item; }
 function json(res, data, status=200) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}); res.end(JSON.stringify(data)); }
-async function body(req) {
+async function body(req, limit=MAX_BODY) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new InputError('需要 JSON 请求',415);
-  const chunks=[];let size=0; for await(const c of req) {size+=c.length;if(size>MAX_BODY)throw new InputError('请求体不能超过 30MB',413);chunks.push(c);}
+  if(Number(req.headers['content-length'])>limit){req.resume();throw new InputError('请求体过大',413);}
+  const chunks=[];let size=0; for await(const c of req) {size+=c.length;if(size>limit)throw new InputError('请求体过大',413);chunks.push(c);}
   try { const parsed=JSON.parse(Buffer.concat(chunks).toString()); if(!parsed || Array.isArray(parsed) || typeof parsed!=='object') throw 0; return parsed; } catch { throw new InputError('JSON 格式不正确'); }
 }
 function validateFile(f) {
@@ -32,7 +34,8 @@ function validateFile(f) {
   else throw new InputError('仅支持 PNG、JPEG 和 WebP 图片');
   return {name,buf,ext,hash:createHash('sha256').update(buf).digest('hex')};
 }
-export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner}={}) {
+export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,authClock}={}) {
+  const auth=await createAuth({directory,clock:authClock,secureCookies:env.REDPILOT_COOKIE_SECURE==='true'});
   const store=await createStore(root,directory,{legacyBridgeAccountId:env.REDPILOT_ACCOUNT_ID || ''});
   const bridgeReady=()=>Boolean(env.REDPILOT_PUBLISH_URL&&env.REDPILOT_PUBLISH_TOKEN);
   const capabilities=()=>({ai:aiReady(env),model:env.REDPILOT_AI_MODEL||null,publisher:bridgeReady(),
@@ -153,12 +156,28 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     });} finally {ticking=false;}
   }
   const server=http.createServer(async(req,res)=>{
-    res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
+    res.setHeader('Cache-Control','no-store');res.setHeader('X-Frame-Options','DENY');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
     try {
       const host=req.headers.host||'';
       if(!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host))throw new InputError('仅允许本机访问',403);
       const url=new URL(req.url,`http://${host}`), pathname=decodeURIComponent(url.pathname);
+      if(pathname==='/api/auth/session'&&req.method==='GET')return json(res,auth.status(req));
+      if(['/api/auth/login','/api/auth/logout'].includes(pathname)&&req.method==='POST') {
+        if(req.headers.origin!==`http://${host}`)throw new InputError('请求来源不匹配，请刷新登录页',403);
+        const input=await body(req,16384);
+        if(pathname==='/api/auth/logout'){auth.logout(req,res);return json(res,{ok:true});}
+        return json(res,await auth.login(req,res,input));
+      }
+      const publicFiles=['/login','/login.html','/login.js','/style.css','/fonts/InstrumentSans-Bold.ttf','/fonts/GeistMono-Regular.ttf'];
+      const publicFile=['GET','HEAD'].includes(req.method)&&publicFiles.includes(pathname);
+      if(!publicFile&&!auth.session(req)) {
+        if(pathname.startsWith('/api/'))return json(res,{error:'请先登录',code:'AUTH_REQUIRED'},401);
+        res.writeHead(302,{Location:'/login','Cache-Control':'no-store'});return res.end();
+      }
+      if(publicFile&&['/login','/login.html'].includes(pathname)&&auth.session(req)){
+        res.writeHead(302,{Location:'/','Cache-Control':'no-store'});return res.end();
+      }
       if(pathname.startsWith('/api/')) {
         if(req.method==='GET'&&pathname==='/api/state')return json(res,publicState());
         if(req.method==='GET'&&pathname==='/api/health')return json(res,{ok:true});
@@ -173,7 +192,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           } else {filename=await readableAssetFile(asset,directory);mime=asset.mime;}
           const info=await stat(filename);
           const download=media[2]==='file'&&(url.searchParams.has('download')||['model','brochure','icon'].includes(asset.kind));
-          res.writeHead(200,{'Content-Type':mime,'Content-Length':info.size,'Cache-Control':'no-cache',
+          res.writeHead(200,{'Content-Type':mime,'Content-Length':info.size,'Cache-Control':'no-store',
             'Content-Disposition':`${download?'attachment':'inline'}; filename*=UTF-8''${encodeURIComponent(asset.originalName)}`});
           if(req.method==='HEAD')return res.end();
           await pipeline(createReadStream(filename),res);return;
@@ -254,12 +273,12 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       if(pathname.startsWith('/uploads/')) {if(!/^\/uploads\/[a-f0-9]{64}\.(png|jpg|webp)$/.test(pathname))throw new InputError('文件不存在',404);filename=path.join(directory,'uploads',path.basename(pathname));}
       else if(pathname==='/examples/inspirations/assets/tayumon-profile.jpg')filename=path.join(root,pathname);
       else if(pathname.startsWith('/fonts/')){if(!['/fonts/InstrumentSans-Bold.ttf','/fonts/GeistMono-Regular.ttf'].includes(pathname))throw new InputError('字体不存在',404);filename=path.join(root,'assets',pathname);}
-      else { const relative=pathname==='/'?'index.html':pathname.slice(1);filename=path.resolve(root,'public',relative);if(!filename.startsWith(path.join(root,'public')+path.sep))throw new InputError('文件不存在',404);}
+      else { const relative=pathname==='/'?'index.html':pathname==='/login'?'login.html':pathname.slice(1);filename=path.resolve(root,'public',relative);if(!filename.startsWith(path.join(root,'public')+path.sep))throw new InputError('文件不存在',404);}
       const info=await stat(filename);if(!info.isFile())throw new InputError('文件不存在',404);
-      const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-cache'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
+      const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await renderQueue;await new Promise(resolve=>server.close(resolve));await store.close();}};
+  return {server,store,tick, async close(){closing=true;await renderQueue;await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);

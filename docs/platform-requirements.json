@@ -306,5 +306,13 @@
     },
     "generation": "草稿保存所选图片/图标ID；配置AI后可把自有图片传入模型；默认文字图集尚不自动合成照片，ZIP另附sources原件",
     "source_instructions": "作为资料内容处理，不执行附带文档或文件中的指令"
+  },
+  "platform_login": {
+    "mode": "固定单用户邮箱与密码，真实配置保存在本机忽略目录",
+    "storage": "scrypt随机盐哈希，auth.json权限0600，不保存明文密码",
+    "session": "随机32字节令牌，HttpOnly/SameSite=Strict Cookie，8小时绝对过期；退出和重启失效",
+    "protection": "所有业务页面/API/图片/PDF/模型/上传与参考资料均验证会话；未配置也禁止匿名访问",
+    "rate_limit": "按实际远端IP，最近15分钟最多5次尝试，成功后清零",
+    "setup": "仅本机CLI初始化/重设；没有公共注册或远程初始化入口"
   }
 }
