@@ -21,7 +21,7 @@ import { fetchTrendBoards } from './trend-sources.mjs';
 import { initEditorial, editorialActive, normalizeBoards, rankedTrends, reportSettings, reportDate, addTopic, createDiscussion, queueReport, buildReport } from './editorial.mjs';
 import { readFeishuSources } from './feishu-reader.mjs';
 import { initFeishu, updateFeishuSettings, queueFeishuSync, feishuDue, finishFeishuSync, productForAI } from './feishu.mjs';
-import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError } from './product-assets.mjs';
+import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError, imageRole, isAutomaticImage } from './product-assets.mjs';
 import { accountById, createAccount, updateAccount, setDefaultAccount, archiveAccount, saveAccountSettings, syncDefaultSettings } from './accounts.mjs';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const MAX_BODY = 30*1024*1024;
@@ -94,7 +94,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     const account=accountById(s,accountId);
     const ref=scopedReference(s,referenceId,account.id);
     const useAI=method!=='template'&&aiReady(env);
-    const selected=draftMode==='text'?[]:selectedProductAssets(s,productAssetIds ?? s.productAssets.filter(a=>a.kind==='image'&&a.metadata?.testOnly!==true).slice(-2).map(a=>a.id));
+    const selected=draftMode==='text'?[]:selectedProductAssets(s,productAssetIds ?? s.productAssets.filter(a=>isAutomaticImage(a,s.productAssets)).slice(-2).map(a=>a.id));
     const materialCatalog=selected.map(a=>({id:a.id,name:a.name,kind:a.kind,description:a.description}));
     const accountInstruction=`账号：${account.name}。账号类型：${account.type==='official'?'官方':'普通'}。账号定位与备注：${account.notes || '无'}。本次要求：${instruction}。可用自有产品素材：${JSON.stringify(materialCatalog)}。产品素材仅用于外观和品牌参考，不作为功能实测依据。`;
     const data=useAI?await generate(env,productForAI(s),ref,accountInstruction,mode,[...(ref?await imagesFor(ref,root,directory):[]),...await productVisionImages(selected,directory)],fetcher,draftMode):templateDraft(s.product,ref,instruction,draftMode);
@@ -200,7 +200,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     if((request.method==='ai'||rewrite)&&resolvedMethod!=='ai')throw generationError('ai_unconfigured','AI 未配置，请选择本地事实模板');
     const waiting=resolvedMethod==='ai'&&reference&&['queued','reading'].includes(reference.linkRead?.status);
     if(resolvedMethod==='ai'&&reference&&!sourceMaterial(reference)&&!waiting)throw generationError('source_pending','请先重读链接，或补充截图、正文后再生成');
-    const selected=request.contentMode==='text'?[]:selectedProductAssets(s,request.productAssetIds??s.productAssets.filter(a=>a.kind==='image'&&a.metadata?.testOnly!==true).slice(-2).map(a=>a.id));
+    const selected=request.contentMode==='text'?[]:selectedProductAssets(s,request.productAssetIds??s.productAssets.filter(a=>isAutomaticImage(a,s.productAssets)).slice(-2).map(a=>a.id));
     const active=s.draftGenerationJobs.find(job=>generationActive(job)&&job.accountId===account.id&&job.requestFingerprint===requestFingerprint);
     if(active){if(clientRequestId){active.clientRequestIds ||= active.clientRequestId?[active.clientRequestId]:[];if(active.clientRequestIds.length>=100)throw new InputError('这项任务的重复请求较多，请等待完成',409);active.clientRequestIds.push(clientRequestId);active.clientRequestId ||= clientRequestId;}return active;}
     if(s.draftGenerationJobs.filter(generationActive).length>=20)throw new InputError('生成任务较多，请等待现有任务完成',409);
@@ -573,7 +573,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           if(!asset){
             asset=await uploadProductAsset(s,directory,{name:`AI-${job.id}.${result.extension}`,kind:'image',data:result.bytes.toString('base64')});
             asset.description='AI 生成图片，需人工核对产品外观；不作为实拍或功能验证依据';
-            asset.metadata={...asset.metadata,imageJobId:job.id,sourceAssetIds:job.sourceAssetIds,model:result.model,aiGenerated:true};
+            asset.metadata={...asset.metadata,imageJobId:job.id,sourceAssetIds:job.sourceAssetIds,model:result.model,aiGenerated:true,usage:'publication',...(task.sources.some(source=>imageRole(source,s.productAssets)==='test')?{testOnly:true}:{})};
           }
           job.status='completed';job.assetId=asset.id;job.model=result.model;job.completedAt=now();
           store.event(s,'image','AI 图片已保存到素材库');
@@ -608,8 +608,8 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           const job=requireItem(s.productRenders,jobId),model=requireItem(s.productAssets,job.assetId);
           const [image]=await importProductAssets(s,directory,[outputPath],'managed',[`${model.name} · ${job.preset} 产品图`]);
           if(image.kind!=='image'||image.mime!=='image/png')throw new InputError('渲染器没有生成有效 PNG');
-          image.description='根据产品3D模型生成的几何渲染图，非实拍或功能验证画面';
-          image.metadata.modelAssetId=model.id;image.metadata.preset=job.preset;image.metadata.modelSha256=model.sha256;
+          image.description='3D 模型几何预览，需制作成品配图后再发布；非实拍或功能验证画面';
+          image.metadata.modelAssetId=model.id;image.metadata.preset=job.preset;image.metadata.modelSha256=model.sha256;image.metadata.previewOnly=true;
           job.status='completed';job.completedAt=now();job.imageAssetId=image.id;job.previewUrl=`/api/product-assets/${image.id}/file`;
           model.previewAssetId=image.id;
           store.event(s,'render',`产品图已生成：${model.name}`);

@@ -183,6 +183,43 @@ test('account-owned references show their own generation status in the all-accou
   const completed=view.run("S.draftGenerationJobs[0].status='completed';referenceGenerateButton(S.inspirations[0])");assert.match(completed,/data-action="generation-open"/);assert.match(completed,/data-id="secondary-job"/);assert.match(completed,/打开草稿/);
 });
 
+test('automatic publication images exclude tests and all adjusted model-preview descendants',()=>{
+  const state=fixture(),image=(id,name,metadata={},extra={})=>({id,name,kind:'image',mime:'image/png',createdAt:'2026-10-26T03:00:00Z',metadata,...extra});
+  state.productAssets.unshift(image('model-preview','MODEL PREVIEW',{modelAssetId:'cad'}),image('model-adjusted','MODEL ADJUSTED',{adjustedFromAssetId:'model-preview'}),image('model-twice','MODEL TWICE',{adjustedFromAssetId:'model-adjusted'}),image('test-adjusted','TEST DERIVED HIDDEN',{adjustedFromAssetId:'test-photo'}),image('test-ai','AI TEST DERIVED HIDDEN',{sourceAssetIds:['test-photo']}),image('server-preview','SERVER MODEL PREVIEW',{}, {imageRole:'modelPreview',publishable:false,automatic:false}),image('finished','成品封面',{usage:'publication',sourceAssetIds:['model-preview']},{imageRole:'publication',publishable:true,automatic:true}),image('manual-only','手动选图',{}, {publishable:true,automatic:false}));
+  const view=ui({state});assert.deepEqual(Array.from(view.run('recentPhotoIds()')),['finished','photo']);assert.equal(view.run('defaultWorkbenchImage().id'),'finished');
+  for(const id of ['model-preview','model-adjusted','model-twice','test-photo','test-adjusted','test-ai','server-preview']){view.context.assetId=id;assert.equal(view.run('publishableImageAsset(productAsset(assetId))'),false,id);}
+  assert.equal(view.run("publishableImageAsset(productAsset('finished'))"),true);assert.equal(view.run("workbenchImages().some(a=>a.id==='model-preview')"),true);
+  assert.deepEqual(Array.from(view.run("draftPhotos({productAssetIds:['model-twice','test-adjusted','finished']}).map(a=>a.id)")),['finished']);
+  const picker=view.run("assetPicker(['model-twice'],'draft')");assert.doesNotMatch(picker,/手动测试素材|TEST DERIVED HIDDEN/);assert.match(picker,/模型预览 · 仅参考/);assert.match(picker,/value="model-preview" disabled/);assert.match(picker,/移除不可用配图/);
+});
+
+test('no eligible publication image leaves defaults empty rather than falling back to a model preview',()=>{
+  const state=fixture();state.productAssets=state.productAssets.filter(a=>a.id==='test-photo');state.productAssets.push({id:'model-preview',name:'模型图',kind:'image',mime:'image/png',metadata:{modelAssetId:'cad'}});
+  const view=ui({state});assert.deepEqual(Array.from(view.run('recentPhotoIds()')),[]);assert.equal(view.run('defaultWorkbenchImage()'),undefined);assert.match(view.run('assetPicker()'),/请选择或生成配图/);
+});
+
+test('modify-images waits for saving and opens the existing workbench with the draft image',async()=>{
+  const gate=deferred(),view=ui({handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    await gate.promise;const result={...request.body,revision:2};state.drafts[0]=result;return response(result);
+  }});view.stubRender();beginEdit(view);assert.match(view.run('studio()'),/data-action="draft-images"/);assert.doesNotMatch(view.run('studio()'),/使用所选产品原图，不叠加标题/);
+  view.run("edit.body='跳转前保存';markDraftChanged()");const pending=view.run('editDraftImages()');await turn();assert.equal(view.run('page'),'studio');
+  gate.resolve();await pending;assert.equal(view.run('page'),'images');assert.equal(view.run('selected'),'d1');assert.equal(view.run('imageSourceId'),'photo');assert.equal(view.run('imageToolTab'),'adjust');assert.equal(view.run('imageAIMode'),'edit');assert.deepEqual(Array.from(view.run('imageReferenceIds')),['photo']);assert.equal(view.requests.some(r=>r.url==='/api/image-jobs'),false);
+});
+
+test('a draft containing only model previews opens generation without making an AI request',async()=>{
+  const state=fixture();state.productAssets.push({id:'model-preview',name:'模型图',kind:'image',mime:'image/png',metadata:{modelAssetId:'cad'}});state.drafts[0].productAssetIds=['model-preview'];
+  const view=ui({state});view.stubRender();beginEdit(view);await view.run('editDraftImages()');
+  assert.equal(view.run('imageSourceId'),null);assert.equal(view.run('imageToolTab'),'ai');assert.equal(view.run('imageAIMode'),'generate');assert.equal(view.requests.length,0);
+});
+
+test('a draft-specific cover stays available to its draft without becoming a new-draft default',async()=>{
+  const state=fixture();state.productAssets.unshift({id:'draft-cover',name:'专属成品封面',kind:'image',mime:'image/png',createdAt:'2026-10-26T03:00:00Z',imageRole:'publication',publishable:true,automatic:false,metadata:{usage:'publication',draftId:'d1'}});state.drafts[0].productAssetIds=['draft-cover'];
+  const view=ui({state});view.stubRender();beginEdit(view);assert.deepEqual(Array.from(view.run('recentPhotoIds()')),['photo']);assert.equal(view.run('defaultWorkbenchImage().id'),'photo');assert.deepEqual(Array.from(view.run("draftPhotos(S.drafts[0]).map(a=>a.id)")),['draft-cover']);
+  assert.equal(view.run("workbenchImages().some(a=>a.id==='test-photo')"),false);assert.equal(view.run("workbenchImages().some(a=>a.id==='draft-cover')"),true);
+  await view.run('editDraftImages()');assert.equal(view.run('imageSourceId'),'draft-cover');assert.equal(view.run('imageToolTab'),'adjust');assert.equal(view.requests.length,0);
+});
+
 test('failed saves keep input, selection and navigation until a successful retry',async()=>{
   let fail=true;
   const view=ui({handle:request=>request.method==='PUT'&&fail?response({error:'保存暂不可用'},503):undefined});view.stubRender();beginEdit(view);view.run("accountFilter='official';location.hash='studio';edit.title='不能丢的输入';markDraftChanged()");

@@ -46,12 +46,49 @@ export function validateDraft(d) {
       return slides.map(s => ({ headline: str(s.headline, 120, true), body: str(s.body || '', 1500) }));
     })(), gaps: lines(d.gaps || [], 20) };
 }
+export function imageRole(asset, assets = []) {
+  if (asset?.kind !== 'image') return null;
+  const byId = new Map(assets.map(value => [value.id, value]));
+  const pending = [asset], seen = new Set();
+  // Test provenance survives both manual adjustments and AI source chains.
+  while (pending.length) {
+    const current = pending.pop();
+    if (!current || seen.has(current)) continue;
+    seen.add(current);
+    if (current.metadata?.testOnly === true) return 'test';
+    const parents = [current.metadata?.adjustedFromAssetId, ...(Array.isArray(current.metadata?.sourceAssetIds) ? current.metadata.sourceAssetIds : [])];
+    for (const key of parents) if (byId.has(key)) pending.push(byId.get(key));
+  }
+  seen.clear();
+  for (let current = asset; current && !seen.has(current); current = byId.get(current.metadata?.adjustedFromAssetId)) {
+    seen.add(current);
+    if (current.metadata?.previewOnly === true) return 'modelPreview';
+    if (current.metadata?.usage === 'publication') return 'publication';
+    if (current.metadata?.modelAssetId) return 'modelPreview';
+  }
+  return 'image';
+}
+export function isPublishableImage(asset, assets = []) { return ['image', 'publication'].includes(imageRole(asset, assets)); }
+export function isAutomaticImage(asset, assets = []) {
+  if (!isPublishableImage(asset, assets)) return false;
+  const byId = new Map(assets.map(value => [value.id, value])), seen = new Set();
+  for (let current = asset; current && !seen.has(current); current = byId.get(current.metadata?.adjustedFromAssetId)) {
+    seen.add(current);
+    if (current.metadata?.draftId || current.metadata?.reusable === false) return false;
+  }
+  return true;
+}
 export function checks(d, product, assets = []) {
   const problems = [];
   if (d.productVersion !== product.version) problems.push('产品资料已更新，请重新生成或核对后保存草稿');
   if ([...d.title].length > 20) problems.push('标题超过 20 字，请缩短');
   if ([...d.body].length > 1000) problems.push('正文超过 1000 字，请精简');
-  if (d.contentMode !== 'text' && !d.productAssetIds?.some(key => assets.some(a => a.id === key && a.kind === 'image'))) problems.push('请至少选择一张真实产品图作为主图');
+  if (d.contentMode !== 'text') {
+    const selected = (d.productAssetIds || []).map(key => assets.find(asset => asset.id === key));
+    if (!selected.some(asset => isPublishableImage(asset, assets))) problems.push('请至少选择一张真实产品图作为主图');
+    if (selected.some(asset => imageRole(asset, assets) === 'test')) problems.push('测试图片不能用于发布，请更换产品成品图');
+    if (selected.some(asset => imageRole(asset, assets) === 'modelPreview')) problems.push('3D 模型预览图不能直接发布，请先制作成品配图');
+  }
   if (d.gaps?.length) problems.push(...d.gaps);
   // Only the title and body are published copy. Legacy storyboard notes stay
   // readable in saved drafts but cannot add promises or satisfy disclosures.

@@ -124,7 +124,9 @@ test('generation runs once asynchronously and stores its returned raster image i
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, 'https://images.example/v1/images/generations');
   const payload = JSON.parse(calls[0].request.body);
-  assert.equal(payload.prompt, generation().prompt);
+  assert.ok(payload.prompt.includes(generation().prompt));
+  assert.match(payload.prompt,/成品图片/);
+  assert.equal(done.job.prompt,generation().prompt,'the stored job keeps the original user brief');
   assert.equal(payload.model, imageEnv.REDPILOT_IMAGE_MODEL);
   assert.equal(payload.size, '1024x1024');
   assert.equal(new Headers(calls[0].request.headers).get('authorization'), 'Bearer ' + imageEnv.REDPILOT_IMAGE_API_KEY);

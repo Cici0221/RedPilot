@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
-import { id, now, InputError, str } from './content.mjs';
+import { id, now, InputError, str, imageRole, isPublishableImage, isAutomaticImage } from './content.mjs';
+export { imageRole, isPublishableImage, isAutomaticImage } from './content.mjs';
 const run = promisify(execFile);
 const TYPES = {
   '.png': ['image', 'image/png'], '.jpg': ['image', 'image/jpeg'], '.jpeg': ['image', 'image/jpeg'],
@@ -136,9 +137,12 @@ export async function uploadProductAsset(state,directory,input) {
     if(source){
       asset.metadata ||= {};
       if(source.id!==asset.id)asset.metadata.adjustedFromAssetId=source.id;
-      if(source.metadata?.testOnly===true)asset.metadata.testOnly=true;
+      const role=imageRole(source,state.productAssets);
+      if(role==='test')asset.metadata.testOnly=true;
+      if(role==='modelPreview')asset.metadata.previewOnly=true;
+      if(role==='publication'&&imageRole(asset,state.productAssets)!=='test')asset.metadata.usage='publication';
       if(source.metadata?.aiGenerated===true)asset.metadata.aiGenerated=true;
-      asset.description=source.metadata?.testOnly===true?'接口测试素材的手动调整，不是产品图片':'根据已有图片手动调整；不代表新增实拍或功能验证';
+      asset.description=role==='test'?'接口测试素材的手动调整，不是产品图片':role==='modelPreview'?'3D 模型预览图的手动调整，需制作成品配图后再发布':'根据已有图片手动调整；不代表新增实拍或功能验证';
     }
     return asset;
   } finally { await unlink(file).catch(()=>{}); }
@@ -164,6 +168,7 @@ export function publicAsset(asset,state) {
   else if(asset.previewName)previewUrl=`/api/product-assets/${asset.id}/preview`;
   else if(asset.previewAssetId&&state.productAssets.some(a=>a.id===asset.previewAssetId))previewUrl=`/api/product-assets/${asset.previewAssetId}/file`;
   return {...safe,fileUrl:`/api/product-assets/${asset.id}/file`,previewUrl,
+    imageRole:imageRole(asset,state.productAssets),publishable:isPublishableImage(asset,state.productAssets),automatic:isAutomaticImage(asset,state.productAssets),
     renderable:asset.kind==='model'&&/\.(step|stp)$/i.test(asset.originalName),
     renderStatus:asset.kind==='model'&&/\.(step|stp)$/i.test(asset.originalName)?'ready':'unavailable'};
 }

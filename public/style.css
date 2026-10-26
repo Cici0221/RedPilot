@@ -154,6 +154,11 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 .content-ratio>span{font-size:12px;color:var(--muted)}
 .content-ratio>small{font-size:11px;color:var(--muted);margin-left:10px}
 .asset-pick-info{min-width:0;flex:1}
+.asset-pick-row.is-reference-only{background:#f5f7fa;cursor:default}
+.asset-pick-row.is-reference-only small,.asset-quality-note{color:var(--muted);font-size:11px;line-height:1.7}
+.asset-picker-warning{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-top:10px;color:var(--warning-text);font-size:11px;line-height:1.7}
+.preview-image-actions{display:flex;align-items:center;gap:12px}
+.preview-image-actions>.btn{font-size:12px}
 .asset-pick-row>span.asset-order{flex:0 0 auto;font-size:9px;color:var(--muted);min-width:42px;text-align:right;line-height:1.7}
 @media(max-width:760px){.product-photo-preview{max-height:460px}.native-text-preview{padding:19px}.native-text-preview h3{font-size:16px}.native-text-body{font-size:12px}.preview-panel .preview-caption{font-size:10px}.asset-pick-row>span.asset-order{font-size:8px;min-width:33px}.draft-toolbar{gap:10px}.content-ratio>input{width:83px}}
 

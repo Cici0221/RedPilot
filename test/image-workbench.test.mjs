@@ -67,7 +67,9 @@ test('generation uses the official JSON endpoint with explicit model, one PNG an
     assert.equal(init.headers.Authorization, 'Bearer fixture-image-key');
     assert.equal(init.headers['Content-Type'], 'application/json');
     assert.ok(init.signal instanceof AbortSignal);
-    assert.deepEqual(JSON.parse(init.body), { model: 'gpt-image-2.5-sunburst', prompt: request.prompt, n: 1, size: '1024x1536', output_format: 'png' });
+    const payload=JSON.parse(init.body);
+    assert.deepEqual({...payload,prompt:request.prompt}, { model: 'gpt-image-2.5-sunburst', prompt: request.prompt, n: 1, size: '1024x1536', output_format: 'png' });
+    assert.ok(payload.prompt.includes(request.prompt));assert.match(payload.prompt,/成品图片/);assert.match(payload.prompt,/本次没有产品来源图/);
     return response(PNG);
   });
   assert.equal(calls, 1);
@@ -80,9 +82,10 @@ test('editing sends multipart references with no local paths or manual boundary 
     assert.equal(url, 'https://api.openai.com/v1/images/edits');
     assert.ok(init.body instanceof FormData);
     assert.equal(init.headers['Content-Type'], undefined);
-    for (const [name, value] of Object.entries({ model: 'gpt-image-2.5-sunburst', prompt: request.prompt, n: '1', size: '1024x1536', output_format: 'png' })) {
+    for (const [name, value] of Object.entries({ model: 'gpt-image-2.5-sunburst', n: '1', size: '1024x1536', output_format: 'png' })) {
       assert.equal(init.body.get(name), value);
     }
+    assert.ok(init.body.get('prompt').includes(request.prompt));assert.match(init.body.get('prompt'),/轮廓、长宽厚比例/);
     const images = init.body.getAll('image[]');
     assert.equal(images.length, 2);
     assert.equal(images[0].name, 'product.png');
@@ -94,6 +97,30 @@ test('editing sends multipart references with no local paths or manual boundary 
     { bytes: PNG, mime: 'image/png', name: '/private/local/product.png' },
     { bytes: WEBP, mime: 'image/webp', name: 'C:\\private\\second.webp' }
   ] });
+});
+
+test('finished-art prompts preserve exact user copy while requiring readable layout, material and lighting quality',async()=>{
+  const prompt='封面标题：“卡放家里，手机照常用”\n副标题：“工程内测”\n用暖灰色背景，不要蓝白色；竖版，下方留白。';
+  await run(async(_url,init)=>{
+    const sent=JSON.parse(init.body).prompt;
+    assert.ok(sent.includes(prompt),'the full user brief and verbatim Chinese copy must remain intact');
+    assert.match(sent,/用户明确指定的配色/);assert.match(sent,/逐字准确/);assert.match(sent,/未指定文字时不添加文字/);
+    assert.match(sent,/缩略图仍能辨识/);assert.match(sent,/真实接触阴影和一致透视/);assert.match(sent,/合理反射/);assert.match(sent,/不擅自补标语、价格、销量或宣传承诺/);
+    assert.match(sent,/不凭文字捏造品牌产品实物/);assert.match(sent,/不发明产品结构、配件、通信功能或应用界面/);
+    return response(PNG);
+  },{request:{...request,prompt}});
+});
+
+test('reference edits lock real product geometry and rebuild rough CAD presentation instead of copying preview quality',async()=>{
+  const edit={...request,mode:'edit',sourceAssetIds:['png'],prompt:'保留产品外形，制作小红书蓝白封面，标题：“备用号怎么安放？”'};
+  await run(async(_url,init)=>{
+    const sent=init.body.get('prompt');
+    assert.ok(sent.includes(edit.prompt));assert.match(sent,/第1张优先用于识别主体/);assert.match(sent,/开孔、按键、接口、屏幕位置、标志/);
+    assert.match(sent,/不拼接不同产品，不补造背面或内部结构/);assert.match(sent,/保留未要求修改的内容/);
+    assert.match(sent,/模型预览或CAD图，只取几何与比例/);assert.match(sent,/不复制灰模材质、网格感、锯齿、生硬阴影/);assert.match(sent,/重新制作成品级光影和画面/);
+    assert.match(sent,/不额外添加信号条、通话画面、功能图标或连接示意/);assert.doesNotMatch(sent,/\/private\/local/);
+    assert.equal(init.body.getAll('image[]').length,1);return response(PNG);
+  },{request:edit,sourceImages:[{bytes:PNG,mime:'image/png',name:'/private/local/product.png'}]});
 });
 
 test('provider accepts validated JPEG and WebP bytes without trusting output names', async () => {
