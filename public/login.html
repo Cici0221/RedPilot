@@ -16,6 +16,7 @@
       <form id="login-form">
         <div class="field"><label for="login-email">邮箱</label><input id="login-email" name="email" type="email" autocomplete="username" inputmode="email" maxlength="254" autocapitalize="none" spellcheck="false" required></div>
         <div class="field"><label for="login-password">密码</label><div class="password-control"><input id="login-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required><button id="password-toggle" type="button" aria-controls="login-password" aria-label="显示密码" aria-pressed="false">显示</button></div></div>
+        <label class="login-remember"><input id="login-remember" name="remember" type="checkbox" checked><span>记住登录 30 天</span></label>
         <p id="login-error" class="login-error" role="alert" aria-live="polite" hidden></p>
         <button id="login-submit" class="btn login-submit" type="submit" disabled>登录</button>
       </form>

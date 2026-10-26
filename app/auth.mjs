@@ -7,6 +7,7 @@ import { InputError } from './content.mjs';
 const scrypt = promisify(derive);
 const COOKIE = 'redpilot_session';
 const SESSION_MS = 8 * 60 * 60 * 1000;
+const REMEMBER_MS = 30 * 24 * 60 * 60 * 1000;
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
 const PARAMS = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
@@ -55,6 +56,45 @@ export async function createAuth({ directory, clock = () => Date.now(), secureCo
   if (record && !validRecord(record)) throw new Error('登录配置无效，请在本机重新配置');
   const sessions = new Map();
   const attempts = new Map();
+  const filename = path.join(directory, 'sessions.json');
+  const credentialFingerprint = record ? tokenHash(JSON.stringify([record.email, record.salt, record.hash, record.params])) : null;
+  try {
+    const saved = JSON.parse(await readFile(filename, 'utf8'));
+    await chmod(filename, 0o600);
+    if (record && saved?.version === 1 && saved.credentialFingerprint === credentialFingerprint && Array.isArray(saved.sessions)) {
+      const time = clock();
+      for (const item of saved.sessions.slice(-1000)) {
+        if (!/^[a-f0-9]{64}$/.test(item?.tokenHash || '') || !Number.isSafeInteger(item.createdAt) || !Number.isSafeInteger(item.expiresAt) ||
+            item.createdAt > time || item.expiresAt <= time || item.expiresAt - item.createdAt !== REMEMBER_MS) continue;
+        sessions.set(item.tokenHash, { createdAt: item.createdAt, expiresAt: item.expiresAt, remember: true });
+      }
+    }
+  } catch (error) {
+    // A missing or damaged remembered session never grants access or prevents a fresh login.
+    if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw new Error('记住登录的数据无法读取，请检查本机文件权限');
+  }
+  let writes = Promise.resolve();
+  async function persistSessions() {
+    const temporary = filename + '.' + randomBytes(8).toString('hex') + '.tmp';
+    const saved = { version: 1, credentialFingerprint, sessions: [...sessions].filter(([, value]) => value.remember && value.expiresAt > clock())
+      .map(([hash, value]) => ({ tokenHash: hash, createdAt: value.createdAt, expiresAt: value.expiresAt })) };
+    try {
+      await writeFile(temporary, JSON.stringify(saved, null, 2), { mode: 0o600, flag: 'wx' });
+      await rename(temporary, filename);
+    } finally { await unlink(temporary).catch(() => {}); }
+  }
+  function changeSessions(change) {
+    const task = writes.then(async () => {
+      const previous = new Map(sessions);
+      try { purge(); change(); await persistSessions(); }
+      catch {
+        sessions.clear(); for (const [key, value] of previous) sessions.set(key, value);
+        throw new InputError('登录状态保存失败，请检查本机存储后重试', 503);
+      }
+    });
+    writes = task.catch(() => {});
+    return task;
+  }
   function cookie(value, seconds, request) {
     return `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${secureCookies || request.socket.encrypted ? '; Secure' : ''}`;
   }
@@ -77,13 +117,14 @@ export async function createAuth({ directory, clock = () => Date.now(), secureCo
     return current ? { authenticated: true, configured: true, user: { email: record.email }, expiresAt: new Date(current.expiresAt).toISOString() }
       : { authenticated: false, configured: Boolean(record) };
   }
-  function logout(request, response) {
+  async function logout(request, response) {
     const token = cookieToken(request);
-    if (token) sessions.delete(tokenHash(token));
+    if (token && sessions.has(tokenHash(token))) await changeSessions(() => sessions.delete(tokenHash(token)));
     response.setHeader('Set-Cookie', cookie('', 0, request));
   }
   async function login(request, response, input) {
     if (!record) throw new InputError('登录账号尚未配置，请先在本机完成设置', 503);
+    if (input?.remember !== undefined && typeof input.remember !== 'boolean') throw new InputError('记住登录的选项不正确');
     purge();
     // Use the actual peer address; forwarded headers cannot reset or share another client's limit.
     const address = request.socket.remoteAddress || 'local';
@@ -102,13 +143,16 @@ export async function createAuth({ directory, clock = () => Date.now(), secureCo
     const passwordMatches = timingSafeEqual(actual, Buffer.from(record.hash, 'hex'));
     if (!passwordMatches || email !== record.email) throw new InputError('账号或密码不正确', 401);
     attempts.delete(address);
-    logout(request, response);
     const token = randomBytes(32).toString('base64url');
-    const expiresAt = clock() + SESSION_MS;
-    if (sessions.size >= 1000) sessions.delete(sessions.keys().next().value);
-    sessions.set(tokenHash(token), { expiresAt });
-    response.setHeader('Set-Cookie', cookie(token, SESSION_MS / 1000, request));
+    const remember = input.remember === true, duration = remember ? REMEMBER_MS : SESSION_MS;
+    const createdAt = clock(), expiresAt = createdAt + duration, previousToken = cookieToken(request);
+    await changeSessions(() => {
+      if (previousToken) sessions.delete(tokenHash(previousToken));
+      if (sessions.size >= 1000) sessions.delete(sessions.keys().next().value);
+      sessions.set(tokenHash(token), { createdAt, expiresAt, remember });
+    });
+    response.setHeader('Set-Cookie', cookie(token, duration / 1000, request));
     return { ok: true, user: { email: record.email }, expiresAt: new Date(expiresAt).toISOString() };
   }
-  return { status, session, login, logout, close() { sessions.clear(); attempts.clear(); } };
+  return { status, session, login, logout, async close() { await writes; sessions.clear(); attempts.clear(); } };
 }

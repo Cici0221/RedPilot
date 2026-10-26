@@ -652,7 +652,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       if(['/api/auth/login','/api/auth/logout'].includes(pathname)&&req.method==='POST') {
         if(req.headers.origin!==`http://${host}`)throw new InputError('请求来源不匹配，请刷新登录页',403);
         const input=await body(req,16384);
-        if(pathname==='/api/auth/logout'){auth.logout(req,res);return json(res,{ok:true});}
+        if(pathname==='/api/auth/logout'){await auth.logout(req,res);return json(res,{ok:true});}
         return json(res,await auth.login(req,res,input));
       }
       const publicFiles=['/login','/login.html','/login.js','/style.css','/fonts/InstrumentSans-Bold.ttf','/fonts/GeistMono-Regular.ttf'];
@@ -883,7 +883,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue,nativeQueue,draftGenerationQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await connections.close();await nativePublisher.close?.();await store.close();}};
+  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue,nativeQueue,draftGenerationQueue]);await new Promise(resolve=>server.close(resolve));await auth.close();await connections.close();await nativePublisher.close?.();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);

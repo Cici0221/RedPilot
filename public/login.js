@@ -1,6 +1,7 @@
 const form = document.querySelector('#login-form');
 const email = document.querySelector('#login-email');
 const password = document.querySelector('#login-password');
+const remember = document.querySelector('#login-remember');
 const submit = document.querySelector('#login-submit');
 const toggle = document.querySelector('#password-toggle');
 const error = document.querySelector('#login-error');
@@ -31,6 +32,7 @@ form.addEventListener('submit', async event => {
   if (submitting || !configured || !form.reportValidity()) return;
   submitting = true;
   submit.disabled = true;
+  remember.disabled = true;
   submit.textContent = '登录中…';
   showError('');
   try {
@@ -38,10 +40,10 @@ form.addEventListener('submit', async event => {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.value.trim(), password: password.value })
+      body: JSON.stringify({ email: email.value.trim(), password: password.value, remember: remember.checked })
     });
     if (!response.ok) {
-      const messages = { 401: '账号或密码不正确', 429: '尝试次数过多，请稍后再试', 503: '登录尚未配置' };
+      const messages = { 401: '账号或密码不正确', 429: '尝试次数过多，请稍后再试', 503: '登录服务暂不可用，请重试' };
       showError(messages[response.status] || '登录未完成，请重试', response.status === 401);
       return;
     }
@@ -54,6 +56,7 @@ form.addEventListener('submit', async event => {
   } finally {
     submitting = false;
     submit.disabled = !configured;
+    remember.disabled = false;
     submit.textContent = '登录';
   }
 });

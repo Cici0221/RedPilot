@@ -112,6 +112,8 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 .login-card .field{margin-bottom:19px}
 .login-card .field>label{font-size:12px}
 .login-card input{font-size:14px;padding:11px 12px}
+.login-remember{display:flex;align-items:center;gap:9px;margin:0 0 16px;color:var(--ink);font-size:12px;line-height:1.8;cursor:pointer}
+.login-card .login-remember input{width:15px;height:15px;flex:0 0 15px;margin:0;padding:0;accent-color:#0069dd}
 .password-control{position:relative}
 .password-control input{padding-right:64px}
 .password-control button{position:absolute;right:6px;top:50%;transform:translateY(-50%);padding:7px 10px;background:none;color:var(--muted);font-size:11px;border-radius:4px}
