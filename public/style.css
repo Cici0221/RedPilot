@@ -601,7 +601,7 @@ textarea{min-height:132px;line-height:1.65;padding:12px 14px}
 .workspace-tabs,.product-tabs,.operation-tabs{overflow-x:auto;overflow-y:hidden;max-width:100%;min-width:0}
 .product-tabs>button,.workspace-tabs>button{flex-shrink:0;white-space:nowrap}
 .ref-footer,.connect-row,.asset-card-actions,.daily-account-row{gap:12px;flex-wrap:wrap}
-.asset-card-title,.trend-board-head{flex-wrap:wrap}
+.asset-card-title{flex-wrap:wrap}
 .asset-render{flex-wrap:wrap}
 .asset-render>select{flex:1 1 130px}
 .asset-render>.btn{flex:1 1 auto}
@@ -715,3 +715,14 @@ button.report-metric:focus-visible{outline:3px solid #007aff40;outline-offset:3p
 .settings-history summary,.image-job-details summary{cursor:pointer;color:var(--muted);font-size:var(--type-meta)}
 .image-job-details{margin-top:14px}
 @media(max-width:760px){.sidebar-auth{margin-top:0}.report-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.report-metric{padding:13px 11px}.report-metric>div{font-size:var(--type-caption)}.report-metric>strong{font-size:var(--type-page)}.report-metric .metric-arrow{display:none}.report-metric>strong>small{font-size:var(--type-caption);margin-left:4px}}
+
+/* Keep trend headings and platform metadata on shared, predictable rows. */
+.trends-layout>.trend-matches>.operation-section-head,
+.trends-layout>.trend-all>.operation-section-head{min-height:52px;margin-bottom:18px;flex-wrap:nowrap}
+.trends-layout>.trend-all>.operation-section-head>span{margin-top:0}
+.trend-board-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;align-items:start;padding:18px 16px}
+.trend-board-head>h3{min-width:0;margin:0;line-height:1.6}
+.trend-board-head>.badge{grid-column:2;grid-row:1;justify-self:end;margin-top:3px}
+.trend-board-head>.trend-board-name,.trend-board-head>.trend-board-time{grid-column:1 / -1;min-width:0;min-height:1.65em;margin:0;line-height:1.65}
+.trend-board-head>.trend-board-name{color:var(--body-text)}
+@media(max-width:600px){.trends-layout>.trend-matches>.operation-section-head{gap:8px}.trends-layout .operation-segment>button{padding-inline:7px}}
