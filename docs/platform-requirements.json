@@ -522,7 +522,7 @@
   },
   "service_connections": {
     "ai": {
-      "settings_ui": "API密钥密码框、模型、可展开服务地址、保存并测试；保存后清空输入，不进全局UI状态",
+      "settings_ui": "API密钥密码框、模型、可展开服务地址与接口协议、保存并测试；保存后清空输入，不进全局UI状态",
       "storage": {
         "path": "runtime/connections.json",
         "mode": "0600",
@@ -535,10 +535,11 @@
         "POST /api/connections/ai/test"
       ],
       "default_model": "gpt-6.1-sol",
-      "model_capabilities": "已核验官方支持图片输入与JSON Chat Completions；仍需用有效密钥验证实际连接",
-      "probe": "固定JSON要求与微型图片，不发送产品私有资料",
+      "model_capabilities": "支持图片输入与JSON文字接口；不同服务和模型的实际能力以连接探针及任务结果为准，不代表图片生成已验证",
+      "wire_api": {"supported": ["chat", "responses"], "legacy_default": "chat", "env": "REDPILOT_AI_WIRE_API", "store": false, "shared_transport": "连接探针与真实分析、创作、讨论共用构造和解析；Responses支持完整JSON及SSE完成对象，拒绝截断、拒答、失败和未完成结果"},
+      "probe": "固定JSON要求与有效32像素测试图片，不发送产品私有资料；切换协议或其他连接配置后须重新验证",
       "base_url": "默认https://api.openai.com/v1；仅公网HTTPS，无query/userinfo/hash，换址须重填密钥",
-      "actual_status": "not_connected",
+      "actual_status": "以运行时最新连接测试为准",
       "credential_provisioning": {
         "explicit_permission_required": true,
         "local_destination_confirmation_required": true,

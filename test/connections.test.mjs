@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, stat, rm } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,9 @@ const BASE = 'https://models.example.com/v1';
 const KEY = 'test-only-runtime-provider-key';
 const ENV_KEY = 'test-only-environment-provider-key';
 const response = value => new Response(JSON.stringify({ choices: [{ message: { content: typeof value === 'string' ? value : JSON.stringify(value) } }] }));
+const responsesPayload = (value, extra = {}) => ({ id: 'resp-fixture', status: 'completed', output: [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify(value) }] }], ...extra });
+const responsesJSON = (value, extra) => new Response(JSON.stringify(responsesPayload(value, extra)), { headers: { 'Content-Type': 'application/json' } });
+const responsesSSE = value => new Response('event: response.completed\ndata: ' + JSON.stringify({ type: 'response.completed', response: responsesPayload(value) }) + '\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
 async function fixture(t, { env = {}, fetcher = async () => { throw Error('unexpected provider request'); }, beforeClose } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'redpilot-connections-'));
   const credentials = { email: 'connections-fixture@example.test', password: 'Test-only-' + randomBytes(18).toString('hex') };
@@ -52,7 +55,7 @@ function noSecrets(value) { assert.doesNotMatch(JSON.stringify(value), /test-onl
 test('connection status is read-only, ignores unrelated global keys, and an unconfigured test never calls the provider', async t => {
   let calls = 0;
   const f = await fixture(t, { env: { OPENAI_API_KEY: 'test-only-unrelated-global-key' }, fetcher: async () => { calls++; return response({ ok: true }); } });
-  for (let n = 0; n < 3; n++) { const current = await connections(f); assert.equal(current.ai.configured, false); assert.equal(current.ai.status, 'unconfigured'); noSecrets(current); }
+  for (let n = 0; n < 3; n++) { const current = await connections(f); assert.equal(current.ai.configured, false); assert.equal(current.ai.status, 'unconfigured'); assert.equal(current.ai.wireApi, 'chat'); noSecrets(current); }
   assert.equal((await f.request('connections/ai/test', {})).status, 409); assert.equal(calls, 0);
 });
 
@@ -102,10 +105,11 @@ test('a successful connection check uses a fixed image and JSON prompt without s
   await f.store.mutate(s => { s.product.summary = 'PRIVATE_PRODUCT_SENTINEL'; s.inspirations[0].text = 'PRIVATE_REFERENCE_SENTINEL'; s.feishuDocuments.push({ id: 'private-doc', text: 'PRIVATE_FEISHU_SENTINEL' }); });
   await configure(f); assert.equal((await connections(f)).ai.status, 'untested');
   const checked = ok(await f.request('connections/ai/test', {})); assert.equal(checked.status, 'ready'); assert.ok(checked.checkedAt); assert.equal(checked.error, null);
-  assert.equal(captured.body.model, 'fixture-vision-model'); assert.equal(captured.body.store, false); assert.equal(captured.body.response_format.type, 'json_object');
+  assert.equal(captured.body.model, 'fixture-vision-model'); assert.equal(captured.body.store, false); assert.equal(captured.body.response_format.type, 'json_object'); assert.equal(captured.body.max_completion_tokens, 512);
   const image = captured.body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).find(item => item.type === 'image_url');
   assert.ok(image); assert.match(image.image_url.url, /^data:image\/png;base64,/);
-  assert.deepEqual([...Buffer.from(image.image_url.url.split(',')[1], 'base64').subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  const pixels = Buffer.from(image.image_url.url.split(',')[1], 'base64');
+  assert.deepEqual([...pixels.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]); assert.equal(pixels.readUInt32BE(16), 32); assert.equal(pixels.readUInt32BE(20), 32);
   assert.doesNotMatch(JSON.stringify(captured.body), /PRIVATE_(?:PRODUCT|REFERENCE|FEISHU)_SENTINEL/);
   noSecrets(checked); noSecrets(await state(f));
 });
@@ -128,8 +132,8 @@ test('HTTP 429 classifies only whitelisted error codes or types into specific sa
   let error;
   const f = await fixture(t, { fetcher: async () => new Response(JSON.stringify({ error }), { status: 429 }) }); await configure(f);
   const cases = [
-    ['billing_not_active', /计费未激活.*官方账单.*启用/],
-    ['credit_balance_exhausted', /余额不足.*官方账单.*余额/],
+    ['billing_not_active', /计费未激活.*当前服务商.*账单.*启用/],
+    ['credit_balance_exhausted', /余额不足.*当前服务商.*账单.*余额/],
     ['project_spend_limit_exceeded', /项目消费限额/],
     ['organization_spend_limit_exceeded', /组织消费限额/],
     ['organization_usage_limit_exceeded', /组织用量限额/],
@@ -141,6 +145,7 @@ test('HTTP 429 classifies only whitelisted error codes or types into specific sa
     error = { [field]: code, message: 'NEVER_ECHO_PROVIDER_BODY ' + KEY };
     const checked = ok(await f.request('connections/ai/test', {}));
     assert.equal(checked.status, 'failed'); assert.match(checked.error, expected); assert.ok(checked.error.includes(code));
+    assert.doesNotMatch(checked.error, /OpenAI|官方账单/);
     assert.doesNotMatch(JSON.stringify(checked), /NEVER_ECHO_PROVIDER_BODY/); noSecrets(checked);
   }
   noSecrets(await state(f)); noSecrets(await connections(f));
@@ -175,6 +180,80 @@ test('changing environment fallback configuration on restart invalidates the pre
   const current = (await connections(f)).ai;
   assert.equal(current.configured, true); assert.equal(current.model, 'environment-model-b'); assert.equal(current.status, 'untested'); assert.equal(current.checkedAt, null);
   assert.equal(calls, 1);
+});
+
+test('the selected wire protocol persists privately and older saved configurations remain Chat Completions compatible', async t => {
+  const requests = [];
+  const f = await fixture(t, { env: { REDPILOT_AI_WIRE_API: 'chat' }, fetcher: async (url, request) => { requests.push(url); return url.endsWith('/responses') ? responsesJSON({ ok: true }) : response({ ok: true }); } });
+  const configured = await configure(f, { wireApi: 'responses' }); assert.equal(configured.wireApi, 'responses'); noSecrets(configured);
+  const filename = path.join(f.directory, 'connections.json'); assert.equal(JSON.parse(await readFile(filename, 'utf8')).ai.wireApi, 'responses');
+  await f.reopen({ REDPILOT_AI_WIRE_API: 'invalid-ignored-fallback' }); assert.equal((await connections(f)).ai.wireApi, 'responses');
+  assert.equal(ok(await f.request('connections/ai/test', {})).status, 'ready'); assert.equal(requests[0], BASE + '/responses');
+  await f.reopen(); assert.equal((await connections(f)).ai.status, 'ready');
+  const legacy = JSON.parse(await readFile(filename, 'utf8')); delete legacy.ai.wireApi;
+  await writeFile(filename, JSON.stringify(legacy), { mode: 0o600 });
+  await f.reopen({ REDPILOT_AI_WIRE_API: 'responses' });
+  const current = (await connections(f)).ai; assert.equal(current.wireApi, 'chat'); assert.equal(current.status, 'untested');
+  assert.equal(ok(await f.request('connections/ai/test', {})).status, 'ready'); assert.equal(requests[1], BASE + '/chat/completions');
+});
+
+test('invalid wire protocols cannot replace a valid configuration or cause any network request', async t => {
+  let calls = 0; const f = await fixture(t, { fetcher: async () => { calls++; return response({ ok: true }); } });
+  await configure(f);
+  for (const wireApi of ['', 'other', 'Responses', 'chat/completions', null, 7, {}, []]) assert.equal((await f.request('connections/ai', { wireApi }, 'PUT')).status, 400);
+  assert.equal((await connections(f)).ai.wireApi, 'chat'); assert.equal(calls, 0);
+  assert.equal(ok(await f.request('connections/ai', { wireApi: ' responses ', apiKey: '' }, 'PUT')).wireApi, 'responses');
+});
+
+test('Responses probes accept completed JSON and SSE and use the shared fixed-image request format', async t => {
+  let stream = false; const requests = [];
+  const f = await fixture(t, { fetcher: async (url, request) => { requests.push({ url, body: JSON.parse(request.body) }); return stream ? responsesSSE({ ok: true }) : responsesJSON({ ok: true }); } });
+  await f.store.mutate(s => { s.product.summary = 'PRIVATE_PRODUCT_SENTINEL'; s.inspirations[0].text = 'PRIVATE_REFERENCE_SENTINEL'; });
+  await configure(f, { wireApi: 'responses' }); assert.equal(ok(await f.request('connections/ai/test', {})).status, 'ready');
+  stream = true; assert.equal(ok(await f.request('connections/ai/test', {})).status, 'ready');
+  assert.equal(requests.length, 2);
+  for (const { url, body } of requests) {
+    assert.equal(url, BASE + '/responses'); assert.equal(body.model, 'fixture-vision-model'); assert.equal(body.store, false); assert.equal(body.stream, true);
+    assert.equal(body.max_output_tokens, 1024); assert.equal(body.text.format.type, 'json_object'); assert.equal(body.messages, undefined);
+    const image = body.input[0].content.find(item => item.type === 'input_image'); assert.ok(image); assert.equal(image.detail, 'low');
+    const pixels = Buffer.from(image.image_url.split(',')[1], 'base64'); assert.equal(pixels.readUInt32BE(16), 32); assert.equal(pixels.readUInt32BE(20), 32);
+    assert.doesNotMatch(JSON.stringify(body), /PRIVATE_(?:PRODUCT|REFERENCE)_SENTINEL/);
+  }
+  noSecrets(await connections(f)); noSecrets(await state(f));
+});
+
+test('unfinished or failed Responses data never marks a connection ready and never echoes provider content', async t => {
+  let result;
+  const f = await fixture(t, { fetcher: async () => result() }); await configure(f, { wireApi: 'responses' });
+  const replies = [
+    () => responsesJSON({ ok: true }, { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } }),
+    () => new Response('event: response.output_text.delta\ndata: ' + JSON.stringify({ type: 'response.output_text.delta', delta: '{"ok":true}' }) + '\n\n', { headers: { 'Content-Type': 'text/event-stream' } }),
+    () => new Response('event: response.failed\ndata: ' + JSON.stringify({ type: 'response.failed', response: { status: 'failed', error: { message: 'NEVER_ECHO_PROVIDER_BODY ' + KEY } } }) + '\n\n', { headers: { 'Content-Type': 'text/event-stream' } }),
+    () => responsesJSON({ ok: false })
+  ];
+  for (result of replies) {
+    const checked = ok(await f.request('connections/ai/test', {})); assert.equal(checked.status, 'failed'); assert.ok(checked.error);
+    assert.doesNotMatch(JSON.stringify(checked), /NEVER_ECHO_PROVIDER_BODY|max_output_tokens/); noSecrets(checked);
+  }
+});
+
+test('an environment protocol change invalidates a saved successful check without changing the model or key', async t => {
+  let calls = 0;
+  const env = { REDPILOT_AI_KEY: ENV_KEY, REDPILOT_AI_MODEL: 'fixture-model', REDPILOT_AI_BASE_URL: BASE, REDPILOT_AI_WIRE_API: 'responses' };
+  const f = await fixture(t, { env, fetcher: async () => { calls++; return responsesJSON({ ok: true }); } });
+  assert.equal((await connections(f)).ai.wireApi, 'responses'); assert.equal(ok(await f.request('connections/ai/test', {})).status, 'ready');
+  await f.reopen({ ...env, REDPILOT_AI_WIRE_API: 'chat' });
+  const current = (await connections(f)).ai; assert.equal(current.wireApi, 'chat'); assert.equal(current.status, 'untested'); assert.equal(current.checkedAt, null); assert.equal(calls, 1);
+});
+
+test('switching only the wire protocol while a probe is pending rejects its old completion', async t => {
+  let release, calls = 0; const gate = new Promise(resolve => { release = resolve; }), urls = [];
+  const f = await fixture(t, { beforeClose: () => release(), fetcher: async (url) => { calls++; urls.push(url); if (calls === 1) await gate; return url.endsWith('/responses') ? responsesJSON({ ok: true }) : response({ ok: true }); } });
+  await configure(f); const pending = f.request('connections/ai/test', {}); await waitUntil(async () => calls === 1, 'probe did not start');
+  const updated = ok(await f.request('connections/ai', { wireApi: 'responses', apiKey: '' }, 'PUT'));
+  assert.equal(updated.status, 'untested'); assert.equal(updated.wireApi, 'responses'); release(); assert.equal((await pending).status, 409);
+  assert.equal((await connections(f)).ai.status, 'untested');
+  assert.equal(ok(await f.request('connections/ai/test', {})).status, 'ready'); assert.deepEqual(urls, [BASE + '/chat/completions', BASE + '/responses']);
 });
 
 test('only a literal successful JSON probe marks the provider ready', async t => {

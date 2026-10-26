@@ -3,10 +3,11 @@ import path from 'node:path';
 import {isIP} from 'node:net';
 import {createHash} from 'node:crypto';
 import {InputError,now} from './content.mjs';
+import {normalizeWireApi,createAIRequest,readAIResponse} from './ai-transport.mjs';
 
 const DEFAULT_BASE='https://api.openai.com/v1';
 export const DEFAULT_TEXT_MODEL='gpt-6.1-sol';
-const PROBE_IMAGE='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ZkAAAAASUVORK5CYII=';
+const PROBE_IMAGE='iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGOQy/tAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAN/z8EzmkyhsAAAAAElFTkSuQmCC';
 const controls=/[\u0000-\u001f\u007f]/;
 export function validateAIBase(value){
   if(typeof value!=='string'||value.length>2000||controls.test(value))throw new InputError('AI 服务地址不正确');
@@ -26,14 +27,14 @@ async function readProbe(response){
 }
 const GENERIC_RATE_ERROR='AI 服务额度或频率受限，请检查项目额度';
 const RATE_ERRORS=Object.freeze({
-  billing_not_active:'OpenAI API 计费未激活，请前往官方账单启用 API 计费（billing_not_active）',
-  credit_balance_exhausted:'OpenAI API 余额不足，请前往官方账单添加余额（credit_balance_exhausted）',
-  project_spend_limit_exceeded:'OpenAI 项目消费限额已达上限，请检查项目消费限额（project_spend_limit_exceeded）',
-  organization_spend_limit_exceeded:'OpenAI 组织消费限额已达上限，请检查组织消费限额（organization_spend_limit_exceeded）',
-  organization_usage_limit_exceeded:'OpenAI 组织用量限额已达上限，请检查组织用量限制（organization_usage_limit_exceeded）',
-  insufficient_quota:'OpenAI API 额度不足，请检查官方账单余额及项目或组织限额（insufficient_quota）',
-  rate_limit_exceeded:'OpenAI API 暂时限流，请稍后重试并降低请求频率（rate_limit_exceeded）',
-  slow_down:'OpenAI API 暂时限流，请稍后重试并降低请求频率（slow_down）'
+  billing_not_active:'AI 服务计费未激活，请前往当前服务商的账单页面启用计费（billing_not_active）',
+  credit_balance_exhausted:'AI 服务余额不足，请前往当前服务商的账单页面添加余额（credit_balance_exhausted）',
+  project_spend_limit_exceeded:'AI 服务项目消费限额已达上限，请检查当前服务商的项目消费限额（project_spend_limit_exceeded）',
+  organization_spend_limit_exceeded:'AI 服务组织消费限额已达上限，请检查当前服务商的组织消费限额（organization_spend_limit_exceeded）',
+  organization_usage_limit_exceeded:'AI 服务组织用量限额已达上限，请检查当前服务商的组织用量限制（organization_usage_limit_exceeded）',
+  insufficient_quota:'AI 服务额度不足，请检查当前服务商的账单余额及项目或组织限额（insufficient_quota）',
+  rate_limit_exceeded:'AI 服务暂时限流，请稍后重试并降低请求频率（rate_limit_exceeded）',
+  slow_down:'AI 服务暂时限流，请稍后重试并降低请求频率（slow_down）'
 });
 async function rateError(response){
   try{
@@ -43,24 +44,24 @@ async function rateError(response){
   return GENERIC_RATE_ERROR;
 }
 export async function createConnections(directory,env,fetcher=fetch){
-  const filename=path.join(directory,'connections.json'),fallback={key:env.REDPILOT_AI_KEY||'',model:env.REDPILOT_AI_MODEL||DEFAULT_TEXT_MODEL,baseUrl:env.REDPILOT_AI_BASE_URL||DEFAULT_BASE};
+  const filename=path.join(directory,'connections.json'),fallback={key:env.REDPILOT_AI_KEY||'',model:env.REDPILOT_AI_MODEL||DEFAULT_TEXT_MODEL,baseUrl:env.REDPILOT_AI_BASE_URL||DEFAULT_BASE,wireApi:env.REDPILOT_AI_WIRE_API};
   let saved={};try{saved=JSON.parse(await readFile(filename,'utf8'));await chmod(filename,0o600);}catch(error){if(error.code!=='ENOENT')throw new Error('服务配置无法读取，已保留原文件');}
   let revision=0,queue=Promise.resolve(),pending=null;
-  const config=()=>saved.ai?{key:saved.ai.apiKey,model:saved.ai.model,baseUrl:saved.ai.baseUrl}:fallback;
+  const config=()=>{const value=saved.ai?{key:saved.ai.apiKey,model:saved.ai.model,baseUrl:saved.ai.baseUrl,wireApi:saved.ai.wireApi}:fallback;return {...value,wireApi:normalizeWireApi(value.wireApi)};};
   const fingerprint=c=>createHash('sha256').update(JSON.stringify(c)).digest('hex');
-  const syncEnv=()=>{const c=config();env.REDPILOT_AI_KEY=c.key;env.REDPILOT_AI_MODEL=c.model;env.REDPILOT_AI_BASE_URL=c.baseUrl;};
-  const publicAI=()=>{const c=config(),configured=Boolean(c.key&&c.model),check=saved.aiCheck?.configFingerprint===fingerprint(c)?saved.aiCheck:null;return {configured,model:c.model,baseUrl:c.baseUrl,source:saved.ai?'runtime':fallback.key?'environment':null,status:configured?check?.status||'untested':'unconfigured',checkedAt:check?.checkedAt||null,error:check?.error||null};};
+  const syncEnv=()=>{const c=config();env.REDPILOT_AI_KEY=c.key;env.REDPILOT_AI_MODEL=c.model;env.REDPILOT_AI_BASE_URL=c.baseUrl;env.REDPILOT_AI_WIRE_API=c.wireApi;};
+  const publicAI=()=>{const c=config(),configured=Boolean(c.key&&c.model),check=saved.aiCheck?.configFingerprint===fingerprint(c)?saved.aiCheck:null;return {configured,model:c.model,baseUrl:c.baseUrl,wireApi:c.wireApi,source:saved.ai?'runtime':fallback.key?'environment':null,status:configured?check?.status||'untested':'unconfigured',checkedAt:check?.checkedAt||null,error:check?.error||null};};
   const persist=async next=>{await mkdir(directory,{recursive:true,mode:0o700});await writeFile(filename+'.tmp',JSON.stringify(next,null,2),{mode:0o600});await chmod(filename+'.tmp',0o600);await rename(filename+'.tmp',filename);saved=next;syncEnv();};
   const transaction=fn=>{const task=queue.then(fn);queue=task.catch(()=>{});return task;};
   syncEnv();
   return {
     publicAI,
     update(input){return transaction(async()=>{
-      const current=config(),baseUrl=validateAIBase(input.baseUrl??current.baseUrl),model=modelName(input.model??current.model);
+      const current=config(),baseUrl=validateAIBase(input.baseUrl??current.baseUrl),model=modelName(input.model??current.model),wireApi=normalizeWireApi(input.wireApi===undefined?current.wireApi:input.wireApi);
       let supplied;if('apiKey'in input)supplied=keyValue(input.apiKey);
       if(baseUrl!==current.baseUrl&&!supplied)throw new InputError('切换服务地址时请重新填写密钥');
       const key=supplied||current.key;if(!key)throw new InputError('请填写 API 密钥',409);
-      const next={...saved,ai:{apiKey:key,baseUrl,model},aiCheck:{status:'untested',checkedAt:null,error:null}};
+      const next={...saved,ai:{apiKey:key,baseUrl,model,wireApi},aiCheck:{status:'untested',checkedAt:null,error:null}};
       await persist(next);revision++;return publicAI();
     });},
     test(){
@@ -70,12 +71,13 @@ export async function createConnections(directory,env,fetcher=fetch){
         let error=null;
         try{
           const base=validateAIBase(c.baseUrl);
-          const response=await fetcher(base+'/chat/completions',{method:'POST',redirect:'error',signal:AbortSignal.timeout(20000),headers:{'Content-Type':'application/json',Authorization:'Bearer '+c.key},body:JSON.stringify({model:c.model,store:false,max_completion_tokens:512,response_format:{type:'json_object'},messages:[{role:'system',content:'This is a connection test. Return only JSON. Do not include any credentials.'},{role:'user',content:[{type:'text',text:'Check that you accept the attached tiny image. Reply with exactly this JSON object: {"ok":true}.'},{type:'image_url',image_url:{url:'data:image/png;base64,'+PROBE_IMAGE,detail:'low'}}]}]})});
+          const request=createAIRequest({baseUrl:base,key:c.key,model:c.model,wireApi:c.wireApi,system:'This is a connection test. Return only JSON. Do not include any credentials.',prompt:'Check that you accept the attached small image. Reply with exactly this JSON object: {"ok":true}.',images:[{type:'image_url',image_url:{url:'data:image/png;base64,'+PROBE_IMAGE,detail:'low'}}],maxOutputTokens:c.wireApi==='responses'?1024:512,timeoutMs:c.wireApi==='responses'?45000:20000});
+          const response=await fetcher(request.url,request.options);
           if(!response.ok){
             if(response.status===429)error=await rateError(response);
             else{await response.body?.cancel().catch(()=>{});error=response.status===401||response.status===403?'API 密钥未通过验证，请检查密钥及项目权限':response.status===404?'模型或服务地址不可用，请检查配置':`AI 服务返回 HTTP ${response.status}，连接测试未通过`;}
           }
-          else{const payload=await readProbe(response);const value=JSON.parse(payload.choices?.[0]?.message?.content||'null');if(value?.ok!==true)error='模型没有返回约定的 JSON，连接测试未通过';}
+          else{const value=await readAIResponse(response,{wireApi:c.wireApi});if(value?.ok!==true)error='模型没有返回约定的 JSON，连接测试未通过';}
         }catch{error='AI 连接或图片/JSON 测试未完成，请检查网络、模型和服务地址';}
         return transaction(async()=>{if(version!==revision)throw new InputError('AI 配置已修改，请测试新配置',409);await persist({...saved,aiCheck:{status:error?'failed':'ready',error,checkedAt:now(),configFingerprint:fingerprint(c)}});return publicAI();});
       })();
