@@ -726,3 +726,6 @@ button.report-metric:focus-visible{outline:3px solid #007aff40;outline-offset:3p
 .trend-board-head>.trend-board-name,.trend-board-head>.trend-board-time{grid-column:1 / -1;min-width:0;min-height:1.65em;margin:0;line-height:1.65}
 .trend-board-head>.trend-board-name{color:var(--body-text)}
 @media(max-width:600px){.trends-layout>.trend-matches>.operation-section-head{gap:8px}.trends-layout .operation-segment>button{padding-inline:7px}}
+
+.trend-match-heading .trend-item-title{font:inherit;line-height:inherit}
+.trend-item-title:focus-visible,.trend-appearances>a:focus-visible{outline:2px solid #007aff;outline-offset:4px;border-radius:3px}
