@@ -449,6 +449,21 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 .draft-generation-row>.actions{justify-content:flex-end;gap:12px}
 .draft-generation-row .btn{font-size:var(--type-control);padding:7px 10px}
 .draft-generation-row .btn.ghost{padding:5px 0}
+.studio-creation{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:380px;padding:48px 28px;border:1px solid var(--line,#e2e7ef);border-radius:16px;background:#fff;text-align:center}
+.studio-creation-symbol{display:grid;place-items:center;width:60px;height:60px;margin-bottom:22px;border-radius:18px;background:#edf5ff;color:var(--link-text)}
+.studio-creation-symbol svg{width:28px;height:28px}
+.studio-creation-symbol.is-active{animation:creation-breathe 1.8s ease-in-out infinite}
+.studio-creation h2{margin:0;font-size:24px;line-height:1.4;color:var(--ink)}
+.studio-creation-reference{max-width:600px;margin:12px 0 0;color:var(--muted);font-size:var(--type-body);line-height:1.7;overflow-wrap:anywhere}
+.studio-creation-error{max-width:620px;margin:20px 0 0;color:var(--error-text);font-size:var(--type-body);line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.studio-creation>.actions{justify-content:center;margin-top:24px}
+.studio-creation>.actions:empty{display:none}
+.studio-creation.is-error .studio-creation-symbol{color:var(--error-text);background:#fff3ec}
+.generation-history{display:grid;gap:10px}
+.generation-history .btn{text-align:left;white-space:normal;line-height:1.6}
+@keyframes creation-breathe{50%{opacity:.55;transform:scale(.96)}}
+@media(prefers-reduced-motion:reduce){.studio-creation-symbol.is-active{animation:none}}
+@media(max-width:600px){.studio-creation{min-height:320px;padding:36px 20px}.studio-creation h2{font-size:22px}}
 .generation-mode-switch{position:relative;display:inline-flex;gap:3px;width:max-content;min-width:0;margin:0;padding:3px;border:1px solid #dde4ef;border-radius:8px;background:#f3f6fa;align-self:start}
 .generation-mode-switch>label{position:relative;cursor:pointer}
 .generation-mode-switch input{position:absolute;width:1px;height:1px;opacity:0;margin:0;padding:0;border:0;overflow:hidden}

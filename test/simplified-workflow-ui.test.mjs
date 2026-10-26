@@ -28,7 +28,7 @@ function fixture(){
   };
 }
 function element(extra={}){return {innerHTML:'',textContent:'',hidden:false,disabled:false,value:'',dataset:{},classList:{add(){},remove(){},toggle(){}},querySelector(){return null;},querySelectorAll(){return [];},...extra};}
-function ui({state=fixture(),handle}={}){
+function ui({state=fixture(),handle,storage=new Map()}={}){
   const requests=[],events={},timers=new Map(),notifications=[];let timerId=0;
   const nodes={
     '#app':element(), '#modal':element({open:false,showModal(){this.open=true;},close(){this.open=false;}}), '#modal-content':element(), '#toast':element(),
@@ -61,13 +61,14 @@ function ui({state=fixture(),handle}={}){
     getAll(key){return this.entries.filter(([name])=>name===key).map(([,value])=>value);}
   }
   const context=vm.createContext({fetch:fetcher,URL,Intl,Date,Math,structuredClone,AbortSignal,FormData:FormDataMock,console,
+    localStorage:{getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
     setTimeout:(callback,delay)=>{const id=++timerId;timers.set(id,{callback,delay});return id;},clearTimeout:id=>timers.delete(id),
     document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[],activeElement:{id:''},addEventListener:(type,handler)=>{events[type]=handler;}},
     location:{hash:'',replace(url){this.redirect=url;}},window:{scrollTo(){}},confirm:()=>true,crypto:{randomUUID:()=>`request-${requests.length}`}});
   vm.runInContext(definitions,context);context.initial=clone(state);context.notify=message=>notifications.push(message);
   vm.runInContext('S=initial;toast=notify;',context);vm.runInContext(listeners,context);
   const run=code=>vm.runInContext(code,context);
-  return {state,context,nodes,requests,notifications,timers,run,stubRender(){run('render=()=>{}');},async submit(form,button=element({value:'confirm'})){await events.submit({target:form,submitter:button,preventDefault(){}});return button;},input(target){events.input({target});}};
+  return {state,context,nodes,requests,notifications,timers,storage,run,stubRender(){run('render=()=>{}');},async submit(form,button=element({value:'confirm'})){await events.submit({target:form,submitter:button,preventDefault(){}});return button;},input(target){events.input({target});}};
 }
 function beginEdit(view,id='d1'){view.context.draftId=id;view.run("page='studio';selected=draftId;edit=structuredClone(S.drafts.find(d=>d.id===draftId));dirty=false;");}
 
@@ -551,4 +552,84 @@ test('completed generation notifies once without a persistent completion banner'
   assert.equal(view.notifications.filter(message=>message.includes('草稿已生成')).length,1);assert.equal(view.run('selected'),'d1');assert.equal(view.run('edit.id'),'d1');
   const markup=view.run('draftGenerationJobsMarkup()');assert.doesNotMatch(markup,/data-generation-job-id="(?:watched|old)"|草稿已生成/);assert.match(markup,/data-generation-job-id="active"/);
   view.run("dirty=false;page='library';openCompletedGeneration()");assert.equal(view.notifications.filter(message=>message.includes('草稿已生成')).length,1);assert.equal(view.run('selected'),'d1');
+});
+
+function assertNewCreationOnly(view){
+  const html=view.run('studio()');
+  assert.doesNotMatch(html,/id="draft-form"|id="draft-select"|id="studio-images"|data-action="schedule"|data-action="export"|草稿 d1|真实产品图/);
+  assert.equal(view.run('edit'),null);assert.equal(view.run('selected'),null);
+  return html;
+}
+
+test('a new creation clears the previous editor before the request returns and stays separate through failure',async()=>{
+  const gate=deferred(),view=ui({handle:async(request,{state})=>{
+    if(request.url!=='/api/draft-generations')return;
+    await gate.promise;const job={id:'fresh-job',...request.body,status:'queued',phase:'reading'};state.draftGenerationJobs.unshift(job);return response(job);
+  }});view.stubRender();beginEdit(view);
+  const pending=view.run("enqueueDraftGeneration({referenceId:'pending',instruction:'新内容'})");await turn();
+  assertNewCreationOnly(view);assert.equal(view.state.drafts[0].title,'草稿 d1');
+  gate.resolve();await pending;assert.match(assertNewCreationOnly(view),/读取|排队|生成/);
+  view.state.draftGenerationJobs[0].status='failed';view.state.draftGenerationJobs[0].error='本次生成失败';await view.run('pollDraftGenerations(true)');
+  assert.match(assertNewCreationOnly(view),/本次生成失败/);assert.equal(view.state.drafts.length,2);
+});
+
+test('new creation saves dirty previous copy before leaving it, and save failure never submits a new job',async()=>{
+  const gate=deferred(),view=ui({handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    await gate.promise;const draft={...request.body,revision:2};state.drafts[0]=draft;return response(draft);
+  }});view.stubRender();beginEdit(view);view.run("edit.body='旧稿最后一段修改';markDraftChanged()");
+  const pending=view.run("enqueueDraftGeneration({referenceId:'pending'})");await turn();
+  assert.equal(view.run('selected'),'d1');assert.equal(view.requests.some(request=>request.url==='/api/draft-generations'),false);
+  gate.resolve();await pending;assertNewCreationOnly(view);assert.equal(view.state.drafts[0].body,'旧稿最后一段修改');
+  const failed=ui({handle:request=>request.url==='/api/drafts/d1'?response({error:'旧稿保存失败'},503):undefined});failed.stubRender();beginEdit(failed);failed.run("edit.body='不能丢失';markDraftChanged()");
+  await assert.rejects(failed.run("enqueueDraftGeneration({referenceId:'pending'})"),/旧稿保存失败/);
+  assert.equal(failed.run('selected'),'d1');assert.equal(failed.run('edit.body'),'不能丢失');assert.equal(failed.requests.some(request=>request.url==='/api/draft-generations'),false);
+});
+
+test('uncertain submission and an accepted matching job both keep the new creation view',async()=>{
+  const unknown=ui({handle:request=>request.url==='/api/draft-generations'?response({error:'提交结果尚未确认'},502):undefined});unknown.stubRender();beginEdit(unknown);
+  await unknown.run("enqueueDraftGeneration({referenceId:'pending'})");assert.match(assertNewCreationOnly(unknown),/提交结果尚未确认/);
+  const state=fixture();state.draftGenerationJobs=[{id:'already-running',accountId:'official',referenceId:'pending',method:'ai',contentMode:'image',mode:'综合借鉴',instruction:'',productAssetIds:['photo'],status:'running',phase:'generating'}];
+  const known=ui({state});known.stubRender();beginEdit(known);await known.run("enqueueDraftGeneration({referenceId:'pending'})");
+  assertNewCreationOnly(known);assert.equal(known.requests.some(request=>request.url==='/api/draft-generations'),false);
+});
+
+test('only the current creation result opens and an earlier completion cannot replace it',async()=>{
+  const view=ui();view.stubRender();beginEdit(view);await view.run("enqueueDraftGeneration({referenceId:'pending'})");
+  view.state.draftGenerationJobs.push({id:'older-job',status:'completed',draftId:'d1',accountId:'official'});view.run("draftGenerationWatched.add('older-job')");
+  await view.run('pollDraftGenerations(true)');assertNewCreationOnly(view);
+  const job=view.state.draftGenerationJobs.find(job=>job.id.startsWith('generation-'));
+  const result={...clone(view.state.drafts[0]),id:'new-result',title:'当前任务的新稿',body:'当前新正文',productAssetIds:[]};view.state.drafts.unshift(result);Object.assign(job,{status:'completed',phase:'completed',draftId:result.id});
+  await view.run('pollDraftGenerations(true)');await turn();
+  assert.equal(view.run('selected'),'new-result');const html=view.run('studio()');assert.match(html,/当前任务的新稿/);assert.match(html,/当前新正文/);assert.equal(view.run('edit.id'),'new-result');
+});
+
+test('reload restores the pending creation for its workspace instead of falling back to an old draft',async()=>{
+  const first=ui();first.stubRender();beginEdit(first);await first.run("enqueueDraftGeneration({referenceId:'pending'})");
+  const restored=ui({state:first.state,storage:first.storage});restored.stubRender();await restored.run('refresh(false)');
+  assertNewCreationOnly(restored);assert.match(restored.run('studio()'),/生成|排队/);
+});
+
+test('switching back to a workspace restores its new creation before the first render',async()=>{
+  const view=ui();view.stubRender();beginEdit(view);await view.run("enqueueDraftGeneration({referenceId:'pending'})");
+  view.context.official=clone(view.state);view.context.official.workspaceAccountId='official';
+  view.context.secondary={...clone(view.state),workspaceAccountId:'secondary',draftGenerationJobs:[]};
+  view.run("applyWorkspaceState('secondary',secondary);applyWorkspaceState('official',official)");
+  assertNewCreationOnly(view);assert.match(view.run('studio()'),/生成|排队/);
+});
+
+test('a completed task without its draft stays separate and keeps polling until the new draft arrives',async()=>{
+  const view=ui();view.stubRender();beginEdit(view);await view.run("enqueueDraftGeneration({referenceId:'pending'})");
+  Object.assign(view.state.draftGenerationJobs[0],{status:'completed',phase:'completed',draftId:'later-draft'});
+  await view.run('pollDraftGenerations(true)');assert.match(assertNewCreationOnly(view),/同步草稿/);
+  const before=view.requests.length;await view.run('pollDraftGenerations()');assert.ok(view.requests.length>before);assertNewCreationOnly(view);
+  view.state.drafts.unshift({...clone(view.state.drafts[0]),id:'later-draft',title:'延迟到达的新稿'});
+  await view.run('pollDraftGenerations()');await turn();assert.equal(view.run('selected'),'later-draft');
+});
+
+test('explicitly opening saved work leaves the creation task running without letting it steal focus later',async()=>{
+  const view=ui();view.stubRender();beginEdit(view);await view.run("enqueueDraftGeneration({referenceId:'pending'})");
+  await view.run("nav('draft/d1')");assert.equal(view.run('selected'),'d1');assert.match(view.run('studio()'),/id="draft-form"/);
+  const result={...clone(view.state.drafts[0]),id:'background-result',title:'后台完成的新稿'};view.state.drafts.unshift(result);Object.assign(view.state.draftGenerationJobs[0],{status:'completed',draftId:result.id});
+  await view.run('pollDraftGenerations(true)');await turn();assert.equal(view.run('selected'),'d1');assert.equal(view.run('edit.id'),'d1');
 });
