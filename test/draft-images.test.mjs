@@ -22,24 +22,39 @@ const complete = (state, job, assetId) => {
   Object.assign(job, { status: 'completed', assetId });
 };
 
-test('image plans assign cover, points and conditions, prefer genuine references and exclude tests/icons/other drafts', () => {
+test('image plans assign copy-led pages, prefer genuine references and exclude tests/icons/other drafts', () => {
   const s = unitState();
   s.productAssets.unshift(image('test', { testOnly: true }), image('derived-test', { sourceAssetIds: ['test'] }),
     image('cad', { previewOnly: true }), image('other-draft', { usage: 'publication', aiGenerated: true, draftId: 'other' }),
     image('logo-png', {}, { name: 'RingHi-logo.png' }), image('icon', {}, { kind: 'icon', mime: 'image/svg+xml' }));
   const plans = planDraftImages(s, s.drafts[0]);
-  assert.deepEqual(plans.map(p => p.role), ['cover', 'points', 'conditions']);
+  assert.deepEqual(plans.map(p => p.role), ['cover', 'points', 'detail']);
   for (const plan of plans) {
     assert.deepEqual(plan.sourceAssetIds, ['original']); assert.equal(plan.mode, 'edit'); assert.equal(plan.size, '1024x1536');
     assert.ok(plan.prompt.length <= 4000); assert.ok(plan.copy.length <= 2);
   }
-  assert.deepEqual(plans[0].copy, []); assert.deepEqual(plans[2].copy, s.product.conditions);
+  assert.deepEqual(plans[0].copy, []); assert.deepEqual(plans[2].copy, []);assert.equal(plans[2].headline,'RingHi的外观细节');
   s.productAssets = []; s.product.facts = []; s.product.conditions = [];
   const withoutSources = planDraftImages(s, s.drafts[0]);
   assert.equal(withoutSources[0].mode, 'generate'); assert.match(withoutSources[0].prompt, /不能凭空生成产品硬件/);
-  assert.deepEqual(withoutSources[2].copy, ['RingHi']);
+  assert.deepEqual(withoutSources[2].copy, []);assert.equal(withoutSources[2].headline,'RingHi');
   s.productAssets = [image('cad', { previewOnly: true })];
   assert.match(planDraftImages(s, s.drafts[0])[0].prompt, /CAD几何参考/);
+});
+
+test('supplemental artwork follows this post instead of appending condition or promise lists', () => {
+  const s=unitState(),draft=s.drafts[0];
+  s.product.conditions=['UNRELATED_NETWORK_REQUIREMENT'];s.product.restrictions=['UNRELATED_PROMISE_CHECK'];
+  draft.title='备用号留在哪里';draft.body='短信同步到 App 查看。来电可以在常用手机接听。你会把备用号留在哪里？';
+  const plans=planDraftImages(s,draft),page=plans[2];
+  assert.equal(page.role,'interaction');assert.equal(page.headline,'你会把备用号留在哪里？');assert.deepEqual(page.copy,[]);
+  for(const plan of plans){const printed=JSON.stringify({headline:plan.headline,copy:plan.copy});assert.doesNotMatch(printed,/UNRELATED_NETWORK_REQUIREMENT|UNRELATED_PROMISE_CHECK|使用条件|使用前提/);}
+  const single=planDraftImages(s,draft,{count:1,index:2})[0];assert.equal(single.index,2);assert.equal(single.role,page.role);assert.equal(single.headline,page.headline);
+  draft.body='短信同步到 App 查看。来电可以在常用手机接听。AI 接待后记录事项。';
+  const related=planDraftImages(s,draft)[2];assert.equal(related.role,'context');assert.deepEqual(related.copy,['AI 接待后记录事项']);
+  draft.title='设备怎样联网';draft.body='设备需要连接 Wi-Fi。常用手机需要联网。';
+  const explicit=planDraftImages(s,draft);assert.ok(explicit[1].copy.includes('设备需要连接 Wi-Fi'));assert.ok(explicit[1].copy.includes('常用手机需要联网'));
+  assert.equal(explicit[2].role,'detail');assert.deepEqual(explicit[2].copy,[]);
 });
 
 test('reference-led plans use the saved visible brief without treating competitor screenshots as product images', () => {

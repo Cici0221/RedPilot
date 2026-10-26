@@ -30,9 +30,9 @@ test('legacy storyboard claims cannot block otherwise valid title and body copy'
   assert.deepEqual(checks(value,product,[{id:'real-photo',kind:'image'}]),[]);
 });
 
-test('legacy storyboard disclaimers cannot satisfy the actual body stage requirement or hide real copy claims',()=>{
+test('copy has no mandatory stage appendix while real unsupported copy claims still require review',()=>{
   const value={...draft(''),body:'正在收集需求。',slides:[{headline:'开发内测',body:'并非正式发售，不保证零延迟。'}]};
-  assert.deepEqual(checks(value,product),['请补充当前产品阶段说明']);
+  assert.deepEqual(checks(value,product),[]);
   for(const text of [{title:'全机型兼容',body:'开发内测。'},{title:'产品进展',body:'开发内测。零延迟。'}])assert.ok(checks({...value,...text},product).some(item=>item.startsWith('请核对宣传表述')));
 });
 

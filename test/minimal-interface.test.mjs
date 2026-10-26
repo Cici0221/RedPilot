@@ -48,6 +48,7 @@ function ui(state=fixture()){
       if(/^\/api\/accounts\/[^/]+\/settings$/.test(url)&&request.method==='PUT'){
         const account=state.accounts.find(item=>url===`/api/accounts/${item.id}/settings`);account.settings={...account.settings,...request.body};return reply(account.settings);
       }
+      if(url==='/api/product'&&request.method==='PUT'){Object.assign(state.product,request.body);return reply(state.product);}
       if(url==='/api/draft-generations'&&request.method==='POST'){
         const job={id:'new-generation',...request.body,status:'queued',phase:'queued'};state.draftGenerationJobs.push(job);return reply(job);
       }
@@ -65,6 +66,18 @@ test('daily workspace has useful report controls but no report settings or unrel
   assert.doesNotMatch(html,/workspace-card|local-label|本机存储/);
   assert.match(html,/data-action="logout"/);assert.match(html,/data-page="studio"/);
   view.run("page='studio'");assert.match(view.run('studio()'),/data-action="generate"/);
+});
+
+test('product editing omits internal rule fields and saving visible copy preserves source context',async()=>{
+  const state=fixture();state.product.conditions=['内部事实前提'];state.product.restrictions=['内部事实边界'];
+  const view=ui(state),html=view.run('productFacts()');
+  assert.doesNotMatch(html,/使用条件|未验证承诺|name="conditions"|name="restrictions"|name="stage"|当前产品阶段|内部事实前提|内部事实边界/);
+  assert.match(html,/产品名称/);assert.match(html,/产品一句话说明/);assert.match(html,/资料来源/);
+  view.run('render=()=>{}');
+  await view.submit(node({id:'product-form',values:{name:'新产品名',brand:'品牌',stage:'内测',summary:'新介绍',facts:'一项卖点',sources:'https://example.test/product'}}));
+  const saved=view.requests.find(request=>request.url==='/api/product'&&request.method==='PUT');
+  assert.equal(saved.body.summary,'新介绍');assert.deepEqual(saved.body.facts,['一项卖点']);
+  assert.deepEqual(saved.body.conditions,['内部事实前提']);assert.deepEqual(saved.body.restrictions,['内部事实边界']);
 });
 
 test('operations never duplicate the global workspace account switcher',()=>{

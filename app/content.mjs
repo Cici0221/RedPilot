@@ -27,7 +27,7 @@ export function noteKey(url) {
   return u.origin + u.pathname + u.search;
 }
 export function validateProduct(p) {
-  return { name: str(p.name, 80, true), brand: str(p.brand, 80, true), stage: str(p.stage, 500, true),
+  return { name: str(p.name, 80, true), brand: str(p.brand, 80, true), stage: str(p.stage ?? '', 500),
     summary: str(p.summary, 5000, true), facts: lines(p.facts), conditions: lines(p.conditions),
     restrictions: lines(p.restrictions), sources: lines(p.sources, 20).map(sourceUrl), version: id(), updatedAt: now() };
 }
@@ -107,7 +107,6 @@ export function checks(d, product, assets = []) {
     return /(?:并非|并不是|不是|不代表|不等于|不承诺|不能承诺|不保证|无法保证|不支持|不能宣称|不宣称|不|未)\s*$/.test(prefix.slice(0, denial.index));
   }).map(match => match[0]);
   if (claims.length) problems.push('请核对宣传表述的依据：'+[...new Set(claims)].join('、'));
-  if (!text.includes(product.stage) && !text.includes('内测')) problems.push('请补充当前产品阶段说明');
   return [...new Set(problems)];
 }
 export function templateDraft(product, reference, instruction = '', mode = 'image') {
@@ -115,8 +114,8 @@ export function templateDraft(product, reference, instruction = '', mode = 'imag
   const name = product.name;
   const custom = instruction.trim();
   return { contentMode: mode, title: `${name}，先聊聊你的使用场景`, series: '',
-    body: `我们是${product.brand}，正在做 ${name}。\n\n${product.summary}\n\n资料中记录的方向：\n${product.facts.map(x=>'· '+x).join('\n')}\n\n先说清条件：\n${product.conditions.map(x=>'· '+x).join('\n')}\n\n当前阶段：${product.stage}。具体表现需要以当前实机测试为准。\n\n你最想解决哪种通信困扰？可以只讲场景，不用留下号码。`,
-    tags: [name, '产品开发', '内测意向'], slides: [], gaps: [], method: 'template', referenceIds: reference ? [reference.id] : [],
+    body: `我们是${product.brand}，正在做 ${name}。\n\n${product.summary}\n\n${product.facts.slice(0,3).join('；')}\n\n你会在什么场景下用到它？`,
+    tags: [name], slides: [], gaps: [], method: 'template', referenceIds: reference ? [reference.id] : [],
     adaptation: custom ? `你的要求「${custom}」已保存。当前为本地事实模板，尚未用 AI 执行风格改写。` : '本地事实模板；未执行 AI 风格分析或改写。', instruction: custom };
 }
 export function dateParts(date, timezone) {
