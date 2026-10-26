@@ -197,12 +197,33 @@ function browserBoard(platformId, domains) {
     for (const row of all(document, '[class*="category-wrap"]').filter(visible)) { const anchor = row.querySelector('a[class*="title_"]'); add(text(anchor?.querySelector('.c-single-text-ellipsis')), anchor?.href, Number(text(row.querySelector('[class^="index_"], [class*=" index_"]'))), text(row.querySelector('[class*="hot-index_"]'))); }
   } else if (platformId === 'toutiao' && url.pathname === '/hot-event/hot-board/') {
     try { const value = JSON.parse(document.body?.innerText || ''); if (value.status === 'success' && Array.isArray(value.data)) for (const [index, item] of value.data.entries()) add(item.Title, item.Url, index + 1, String(item.HotValue || '')); } catch {}
-  } else if (platformId === 'xiaohongshu' || platformId === 'douyin') {
+  } else if (platformId === 'douyin' && /^\/hot\/?$/.test(url.pathname)) {
+    // The current official board has a separate heading and a ranked list.
+    // Top-three places are SVG badges; the pinned up.svg is not rank 1.
+    for (const board of all(document, '[data-e2e="feed-right-list-container"]').filter(visible)) {
+      if (!/^抖音热榜$/.test(text(board.querySelector('h1')))) continue;
+      labelledBoard = true;
+      for (const row of all(board, 'li').filter(visible)) {
+        const anchor = row.querySelector('a[href]'), rankNode = row.querySelector('.listStyle');
+        let rank = /^\d+$/.test(text(rankNode)) ? Number(text(rankNode)) : NaN;
+        const badge = rankNode?.querySelector('img');
+        if (badge) {
+          try {
+            const image = new URL(badge.src, result.sourceUrl), match = image.pathname.match(/\/hot_top([123])\.svg$/);
+            if (image.protocol === 'https:' && /(?:^|\.)douyinstatic\.com$/.test(image.hostname) && match) rank = Number(match[1]);
+          } catch {}
+        }
+        const heat = text(row).match(/(\d+(?:\.\d+)?(?:万|亿)?)\s*热度/);
+        add(text(anchor?.querySelector('h3')) || text(anchor), anchor?.href, rank, heat ? heat[1] + '热度' : '');
+      }
+    }
+  }
+  if (!result.items.length && (platformId === 'xiaohongshu' || platformId === 'douyin')) {
     // Require an explicitly labelled ranking widget. Recommendation cards and
     // view/like counts are never substituted for an official hot-search board.
     const heading = platformId === 'douyin' ? /抖音热榜|热点榜/ : /热门搜索|热搜榜|搜索发现/;
     for (const board of all(document, '[data-e2e="hotboard"], [data-e2e="hot-board"], .hot-search-list, .hot-list')) {
-      if (!visible(board) || !heading.test(text(board))) continue;
+      if (!visible(board) || !heading.test(text(board)) && !all(board.parentElement, 'h1, h2, h3, [role="heading"]').some(node => visible(node) && heading.test(text(node)))) continue;
       labelledBoard = true;
       for (const anchor of all(board, 'a[href]').filter(visible)) {
         const row = anchor.closest('li') || anchor.parentElement, rank = Number(text(row?.querySelector('.rank, .index, [data-e2e="rank"]')));
@@ -213,7 +234,9 @@ function browserBoard(platformId, domains) {
   if (result.items.length) { result.status = 'partial'; result.items = result.items.slice(0, 30); return result; }
   const page = text(document.body).slice(0, 40000);
   if (/安全验证|访问过于频繁|操作过于频繁|验证后继续|请完成验证|访问异常|请求异常/.test(page)) { result.status = 'blocked'; result.reasonCode = 'verification_required'; }
-  else if (all(document, '.login-modal, .login-container, .SignFlow, .LoginModal').some(visible) || /登录后查看|登录后浏览|验证码登录|扫码登录|请先登录/.test(page)) { result.status = 'needs_login'; result.reasonCode = 'needs_login'; }
+  else if (all(document, '.login-modal, .login-container, .SignFlow, .LoginModal, [role="dialog"]').some(node => visible(node) && /登录|登入/.test(text(node))) ||
+    platformId === 'xiaohongshu' && all(document, '#search-input').some(node => visible(node) && /登录/.test(node.placeholder || ''))) { result.status = 'needs_login'; result.reasonCode = 'needs_login'; }
+  else if (platformId === 'xiaohongshu' && !labelledBoard && all(document, '#search-input').some(node => visible(node) && !node.value && document.activeElement !== node)) { result.reasonCode = 'board_not_loaded'; result.action = 'open_search'; }
   else if (labelledBoard || !page || document.readyState && document.readyState !== 'complete' || /正在加载|加载中|榜单加载/.test(page)) result.reasonCode = 'board_not_loaded';
   else result.reasonCode = ['xiaohongshu', 'douyin'].includes(platformId) ? 'board_not_exposed' : 'board_not_loaded';
   return result;
@@ -251,9 +274,9 @@ async function chromeBoard(platform, env, fetcher, browser, timing) {
     const budget = remaining(); if (attempt >= 20 || budget <= 0) return false;
     await timing.sleep(Math.min(400, budget)); return true;
   };
-  let result;
-  // Only loading states may be retried. The clock deadline and attempt cap both
-  // bound the window; each info/eval request also receives the remaining budget.
+  let result, searchOpened = false;
+  // DOM hydration may finish after document.readyState. Both the deadline and
+  // attempt cap bound retries; login and verification are never retried away.
   for (let attempt = 0; attempt < 21 && remaining() > 0; attempt++) {
     const info = await step('/info?target=' + encodeURIComponent(browser.target));
     if (info.url && info.url !== 'about:blank' && !isOfficialTrendUrl(platform.id, info.url)) throw new SourceError('unavailable', 'invalid_source');
@@ -266,7 +289,11 @@ async function chromeBoard(platform, env, fetcher, browser, timing) {
     if (items.length) return { status: 'partial', sourceUrl: result.sourceUrl, items, scope: '仅当前官方页面DOM可读取的榜单窗口，最多30条，不代表全量榜单' };
     if (['needs_login', 'blocked'].includes(result.status)) return { status: result.status, sourceUrl: result.sourceUrl, items: [], ...safeTrendFailure(result.status === 'needs_login' ? 'needs_login' : 'verification_required') };
     const failure = safeTrendFailure(result);
-    if (failure.reasonCode !== 'board_not_loaded') return { status: 'unavailable', sourceUrl: result.sourceUrl, items: [], ...failure };
+    if (platform.id === 'xiaohongshu' && result.action === 'open_search' && !searchOpened) {
+      await step('/click?target=' + encodeURIComponent(browser.target), '#search-input');
+      searchOpened = true;
+    }
+    if (!['board_not_loaded', 'board_not_exposed'].includes(failure.reasonCode)) return { status: 'unavailable', sourceUrl: result.sourceUrl, items: [], ...failure };
     if (!await waitAgain(attempt)) break;
   }
   return { status: 'unavailable', sourceUrl: platform.url, items: [], ...safeTrendFailure(result || 'board_not_loaded') };
