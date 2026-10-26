@@ -794,6 +794,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           if(req.method==='POST'&&pathname==='/api/trends/refresh'){if(b.accountId)accountById(s,b.accountId);return queueTrends(s);}
           if(req.method==='POST'&&pathname==='/api/reports/generate'){const a=accountById(s,b.accountId||s.defaultAccountId);return queueReport(s,a,b.date);}
           const reportSettingRoute=pathname.match(/^\/api\/accounts\/([^/]+)\/report-settings$/);
+          // Legacy clients may confirm the fixed schedule, but cannot override it.
           if(req.method==='PUT'&&reportSettingRoute){const a=accountById(s,reportSettingRoute[1]);a.reportSettings=reportSettings(b,a.reportSettings);return a.reportSettings;}
           const reportPlanRoute=pathname.match(/^\/api\/reports\/([^/]+)\/plans\/([^/]+)$/);
           if(req.method==='PUT'&&reportPlanRoute){const report=requireItem(s.operationReports,reportPlanRoute[1]);accountById(s,report.accountId);if(typeof b.done!=='boolean')throw new InputError('计划完成状态不正确');requireItem(report.plans,reportPlanRoute[2]).done=b.done;return report;}

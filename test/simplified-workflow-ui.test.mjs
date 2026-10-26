@@ -121,7 +121,7 @@ test('failed daily inclusion changes restore the checkbox and preserve collectio
 test('overview and the old report route render one daily workspace',async()=>{
   const view=ui();view.run("reportDate='2026-10-26'");await view.run("nav('reports')");
   assert.equal(view.run('page'),'overview');assert.equal(view.context.location.hash,'overview');
-  const html=view.nodes['#app'].innerHTML;assert.match(html,/<h1>今日工作台<\/h1>/);assert.match(html,/待核对/);assert.match(html,/核对产品稿/);assert.match(html,/新发现/);assert.match(html,/最近草稿/);
+  const html=view.nodes['#app'].innerHTML;assert.match(html,/<h1>今日工作台<\/h1>/);assert.match(html,/待核对/);assert.match(html,/核对产品稿/);assert.match(html,/新发现/);assert.doesNotMatch(html,/最近草稿/);
   assert.equal((html.match(/data-page="overview"/g)||[]).length,1);assert.doesNotMatch(html,/data-page="reports"/);
 });
 

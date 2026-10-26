@@ -1,14 +1,16 @@
 import {createHash} from 'node:crypto';
 import {id,now,InputError,str,sourceUrl,dateParts,dailyKey,validateSettings,checks} from './content.mjs';
 import {TREND_PLATFORMS,isOfficialTrendUrl,safeTrendFailure} from './trend-sources.mjs';
+import {DAILY_REPORT_SCHEDULE,defaultReportSettings} from './accounts.mjs';
 
 export const editorialActive=job=>['queued','running'].includes(job.status);
 export const titleKey=value=>String(value||'').toLowerCase().replace(/[\p{P}\p{S}\s]+/gu,'');
 const hash=value=>createHash('sha256').update(value).digest('hex').slice(0,24);
 const validTime=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));
 export function reportSettings(input={},current={}) {
-  const settings=validateSettings({enabled:true,time:'09:00',timezone:'Asia/Shanghai',...current,...input,mode:'review'});
-  return {enabled:settings.enabled,time:settings.time,timezone:settings.timezone,lastDailyKey:current.lastDailyKey||null};
+  const settings=validateSettings({...DAILY_REPORT_SCHEDULE,...input,mode:'review'});
+  if(Object.entries(DAILY_REPORT_SCHEDULE).some(([key,value])=>settings[key]!==value))throw new InputError('日报固定于每天北京时间 09:00 自动生成，无需调整',409);
+  return defaultReportSettings(current);
 }
 export function reportDate(value,timezone='Asia/Shanghai') {
   const date=value??dailyKey(new Date(),timezone);

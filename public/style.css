@@ -696,3 +696,22 @@ dialog{max-width:850px;max-height:90dvh}
   .report-snapshot>dl,.feishu-sync-times{grid-template-columns:minmax(0,1fr)}
   .feishu-sync-times>div:nth-child(3){grid-column:auto}
 }
+
+/* Task-focused surfaces: one home summary and one place for each setting. */
+.sidebar-auth{margin-top:auto}
+.report-metric{text-align:left;font:inherit}
+button.report-metric{cursor:pointer;transition:border-color .15s,background .15s}
+button.report-metric:hover{background:#f8fbff;border-color:#a9c9f3}
+button.report-metric:focus-visible{outline:3px solid #007aff40;outline-offset:3px}
+.report-metric .metric-arrow{color:var(--link-text);font-size:var(--type-card)}
+.report-alerts{display:flex;gap:12px 24px;flex-wrap:wrap;margin:-6px 0 20px}
+.report-alerts .btn{color:var(--warning-text)}
+.calendar-layout.calendar-queue{grid-template-columns:minmax(0,1fr)}
+.calendar-queue>section>.section-head{margin-top:0}
+.account-details{grid-template-columns:repeat(3,minmax(0,1fr))}
+.account-details strong,.account-details>div:first-child strong{font-size:var(--type-section);line-height:1.5}
+.account-daily-summary{font-size:var(--type-meta);color:var(--muted);margin-top:18px;line-height:1.65}
+.settings-history{margin-top:24px;border-top:1px solid var(--line);padding-top:18px}
+.settings-history summary,.image-job-details summary{cursor:pointer;color:var(--muted);font-size:var(--type-meta)}
+.image-job-details{margin-top:14px}
+@media(max-width:760px){.sidebar-auth{margin-top:0}.report-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.report-metric{padding:13px 11px}.report-metric>div{font-size:var(--type-caption)}.report-metric>strong{font-size:var(--type-page)}.report-metric .metric-arrow{display:none}.report-metric>strong>small{font-size:var(--type-caption);margin-left:4px}}

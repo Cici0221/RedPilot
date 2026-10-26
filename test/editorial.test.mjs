@@ -86,16 +86,41 @@ async function trendFinished(f, count) {
   return waitUntil(async () => { const s = await state(f); return s.trendRefreshJobs.length === count && s.trendRefreshJobs.every(job => !['queued', 'running'].includes(job.status)) ? s : false; }, 'scheduled trend refresh did not finish');
 }
 
-test('daily trend settings migrate to Beijing 09:00 and retain an explicitly disabled schedule', async t => {
+test('daily trend settings replace legacy custom schedules with Beijing 09:00 and retain the run key', async t => {
   let calls = 0; const f = await fixture(t, { trendReader: async () => { calls++; return boards(); } });
   await onlyTrendAutomation(f);
   const initial = (await state(f)).trendSchedule;
   assert.equal(initial.enabled, true); assert.equal(initial.time, '09:00'); assert.equal(initial.timezone, 'Asia/Shanghai'); assert.equal(initial.lastDailyKey, null);
   await f.store.mutate(s => { delete s.trendSchedule; }); await f.reopen();
   assert.equal((await state(f)).trendSchedule.time, '09:00');
-  await f.store.mutate(s => { s.trendSchedule.enabled = false; }); await f.reopen();
-  assert.equal((await state(f)).trendSchedule.enabled, false);
+  await f.store.mutate(s => { Object.assign(s.trendSchedule, { enabled: false, time: '08:15', timezone: 'UTC', lastDailyKey: '2030-01-02' }); }); await f.reopen();
+  const migrated = (await state(f)).trendSchedule;
+  assert.equal(migrated.enabled, true); assert.equal(migrated.time, '09:00'); assert.equal(migrated.timezone, 'Asia/Shanghai'); assert.equal(migrated.lastDailyKey, '2030-01-02');
   await f.tick(new Date('2030-01-02T01:00:00.000Z')); assert.equal(calls, 0);
+  await f.tick(new Date('2030-01-03T01:00:00.000Z')); await trendFinished(f, 1); assert.equal(calls, 1);
+});
+
+test('old and new accounts use the fixed daily report schedule while migration preserves publication settings and run keys', async t => {
+  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; return boards(); } });
+  const initial = await state(f), accountId = initial.defaultAccountId;
+  await f.store.mutate(s => {
+    s.feishuSync.enabled = false;
+    s.accounts[0].reportSettings = { enabled: false, time: '21:45', timezone: 'America/New_York', lastDailyKey: '2030-01-02' };
+    s.trendSchedule.lastDailyKey = '2030-01-02';
+  });
+  await f.reopen();
+  const migrated = (await state(f)).accounts.find(account => account.id === accountId);
+  assert.deepEqual(migrated.reportSettings, { enabled: true, time: '09:00', timezone: 'Asia/Shanghai', lastDailyKey: '2030-01-02' });
+  assert.deepEqual(migrated.settings, initial.accounts[0].settings);
+  await f.tick(new Date('2030-01-02T10:00:00.000Z'));
+  assert.equal((await state(f)).reportJobs.length, 0); assert.equal(reads, 0);
+  const created = await addAccount(f, '固定日报时间的新账号');
+  assert.deepEqual(created.reportSettings, { enabled: true, time: '09:00', timezone: 'Asia/Shanghai', lastDailyKey: null });
+  await f.tick(new Date('2030-01-03T00:59:59.000Z'));
+  assert.equal((await state(f)).reportJobs.length, 0); assert.equal(reads, 0);
+  await f.tick(new Date('2030-01-03T01:00:00.000Z'));
+  await waitUntil(async () => (await state(f)).operationReports.length === 2, 'migrated and new account reports did not run at Beijing 09:00');
+  assert.equal(reads, 1);
 });
 
 test('the independent Beijing trend schedule refreshes at 09:00 once per day with all account automation off', async t => {
@@ -172,19 +197,19 @@ test('the 09:00 report waits for the scheduled refresh even if a manual snapshot
   assert.ok(completed.operationReports[0].discoveries.some(discovery => discovery.title === title)); assert.equal(reads, 2);
 });
 
-test('a later report in another timezone refreshes after the Beijing daily snapshot is no longer recent', async t => {
+test('a later enabled account catches up its Beijing daily report using a fresh snapshot', async t => {
   let reads = 0;
   const f = await fixture(t, { trendReader: async () => { reads++; return boards().map(board => ({ ...board,
     fetchedAt: '2030-01-02T' + (reads === 1 ? '01:00:00.000Z' : '14:00:00.000Z') })); } });
   await onlyTrendAutomation(f);
-  await f.store.mutate(s => { s.accounts[0].enabled = true; });
   await f.tick(new Date('2030-01-02T01:00:00.000Z')); const morning = await trendFinished(f, 1), morningJob = morning.trendSchedule.lastJobId;
   await f.store.mutate(s => {
     s.trendRefreshJobs.find(job => job.id === morningJob).completedAt = new Date(Date.now() - 16 * 60 * 1000).toISOString();
-    s.accounts[0].reportSettings = { enabled: true, time: '09:00', timezone: 'America/New_York', lastDailyKey: null };
+    s.accounts[0].enabled = true;
+    s.accounts[0].reportSettings = { enabled: true, time: '09:00', timezone: 'Asia/Shanghai', lastDailyKey: null };
   });
   await f.tick(new Date('2030-01-02T14:00:00.000Z'));
-  const complete = await waitUntil(async () => { const s = await state(f); return s.reportJobs[0]?.status === 'completed' ? s : false; }, 'New York report did not finish');
+  const complete = await waitUntil(async () => { const s = await state(f); return s.reportJobs[0]?.status === 'completed' ? s : false; }, 'catch-up report did not finish');
   assert.equal(reads, 2); assert.equal(complete.trendRefreshJobs.length, 2); assert.notEqual(complete.reportJobs[0].trendJobId, morningJob);
   const discoveries = complete.operationReports[0].discoveries.filter(item => item.matchId);
   assert.ok(discoveries.length > 0); assert.ok(discoveries.every(item => item.sources.every(source => source.fetchedAt === '2030-01-02T14:00:00.000Z')));
@@ -358,26 +383,34 @@ test('editorial sources accept official HTTPS and saved product evidence but rej
   assert.equal((await state(f)).discussions.length, 0);
 });
 
-test('report settings have daily defaults and reject malformed schedules without changing publication settings', async t => {
+test('legacy report settings endpoint accepts only the fixed schedule without changing publication settings or the run key', async t => {
   const f = await fixture(t), initial = await state(f), accountId = initial.defaultAccountId;
   const settings = initial.accounts.find(account => account.id === accountId).reportSettings;
   assert.equal(settings.enabled, true); assert.equal(settings.time, '09:00'); assert.equal(settings.timezone, 'Asia/Shanghai'); assert.equal(settings.lastDailyKey, null);
   for (const invalid of [{ enabled: 'yes' }, { time: '25:00' }, { timezone: 'Imaginary/Zone' }]) {
     assert.equal((await f.request(`accounts/${accountId}/report-settings`, invalid, 'PUT')).status, 400);
   }
-  ok(await f.request(`accounts/${accountId}/report-settings`, { enabled: false, time: '08:15', timezone: 'UTC' }, 'PUT'));
+  for (const custom of [{ enabled: false }, { time: '08:15' }, { timezone: 'UTC' }]) {
+    const rejected = await f.request(`accounts/${accountId}/report-settings`, custom, 'PUT');
+    assert.equal(rejected.status, 409); assert.match(rejected.data.error, /每天北京时间 09:00/);
+  }
+  await f.store.mutate(s => { s.accounts[0].reportSettings.lastDailyKey = '2030-01-02'; });
+  ok(await f.request(`accounts/${accountId}/report-settings`, {}, 'PUT'));
+  ok(await f.request(`accounts/${accountId}/report-settings`, { enabled: true, time: '09:00', timezone: 'Asia/Shanghai', lastDailyKey: null }, 'PUT'));
   const current = await state(f), saved = current.accounts.find(account => account.id === accountId);
-  assert.equal(saved.reportSettings.enabled, false); assert.equal(saved.reportSettings.time, '08:15'); assert.equal(saved.reportSettings.timezone, 'UTC');
+  assert.deepEqual(saved.reportSettings, { enabled: true, time: '09:00', timezone: 'Asia/Shanghai', lastDailyKey: '2030-01-02' });
   assert.deepEqual(saved.settings, initial.accounts.find(account => account.id === accountId).settings);
 });
 
-test('daily reports run once per enabled account-local day and share one trend refresh without publishing or messaging', async t => {
+test('daily reports run at Beijing 09:00 once per enabled account and share one trend refresh without publishing or messaging', async t => {
   let reads = 0, externalCalls = 0;
   const f = await fixture(t, { trendReader: async () => { reads++; return boards(); }, fetcher: async () => { externalCalls++; throw Error('daily reports must not publish or send messages'); } });
   const official = (await state(f)).defaultAccountId, second = await addAccount(f, '第二个日报账号');
   const disabled = ok(await f.request('accounts', { name: '已暂停账号', enabled: false }));
   const archived = await addAccount(f, '归档账号'); ok(await f.request(`accounts/${archived.id}/archive`, {}));
-  const today = new Date('2026-10-26T01:30:00.000Z');
+  await f.tick(new Date('2026-10-26T00:59:59.000Z'));
+  assert.equal((await state(f)).reportJobs.length, 0); assert.equal(reads, 0);
+  const today = new Date('2026-10-26T01:00:00.000Z');
   await f.tick(today);
   const generated = await waitUntil(async () => {
     const s = await state(f), reports = s.operationReports.filter(report => report.date === '2026-10-26');
@@ -386,6 +419,7 @@ test('daily reports run once per enabled account-local day and share one trend r
   assert.deepEqual(generated.operationReports.map(report => report.accountId).sort(), [official, second.id].sort());
   assert.equal(reads, 1); assert.equal(externalCalls, 0); assert.equal(generated.jobs.length, 0);
   for (const accountId of [official, second.id]) assert.equal(generated.accounts.find(account => account.id === accountId).reportSettings.lastDailyKey, '2026-10-26');
+  for (const accountId of [disabled.id, archived.id]) assert.equal(generated.accounts.find(account => account.id === accountId).reportSettings.lastDailyKey, null);
   await f.tick(today); await f.tick(new Date('2026-10-26T08:00:00.000Z'));
   assert.equal((await state(f)).reportJobs.length, 2); assert.equal(reads, 1);
   const manual = await reportFor(f, disabled.id);
