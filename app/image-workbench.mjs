@@ -27,13 +27,17 @@ function serviceBase(value) {
 
 function credentials(env) {
   let key = typeof env.REDPILOT_IMAGE_API_KEY === 'string' && env.REDPILOT_IMAGE_API_KEY.trim()
-    || typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim()
     || '';
   // A main-provider key can only be reused for the exact same normalized service.
   if (!key && typeof env.REDPILOT_AI_KEY === 'string' && env.REDPILOT_AI_KEY.trim()) {
     try {
       if (serviceBase(env.REDPILOT_IMAGE_BASE_URL) === validateAIBase(env.REDPILOT_AI_BASE_URL || DEFAULT_BASE)) key = env.REDPILOT_AI_KEY.trim();
     } catch { /* Invalid service addresses must not enable fallback or break public state. */ }
+  }
+  // A generic official key must not override the configured same-provider key
+  // or be forwarded to an unrelated image service.
+  if (!key && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim()) {
+    try { if (serviceBase(env.REDPILOT_IMAGE_BASE_URL) === DEFAULT_BASE) key = env.OPENAI_API_KEY.trim(); } catch {}
   }
   const model = typeof env.REDPILOT_IMAGE_MODEL === 'string' && env.REDPILOT_IMAGE_MODEL.trim() || DEFAULT_MODEL;
   return { key, model };

@@ -60,7 +60,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     feishu:true,linkReader:true});
   async function initializeWorkspace(){
   // Persist a result-unknown state after restart; never automatically retry an interrupted write.
-  await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];s.imageJobs ||= [];s.draftGenerationJobs ||= [];for(const j of s.draftGenerationJobs)if(['queued','running'].includes(j.status))Object.assign(j,{status:'failed',phase:'failed',reasonCode:'interrupted',error:'服务已重启，草稿生成已停止；请重新生成，不会自动重复调用 AI',errorStatus:409,completedAt:now()});for(const j of s.imageJobs)if(['queued','generating'].includes(j.status)){j.status='failed';j.error='服务已重启，生成结果未知；未自动重试，请先核对图片服务记录';j.completedAt=now();}for(const d of s.drafts){d.contentMode ||= 'image';d.productAssetIds ||= [];if(d.contentMode==='text'){d.productAssetIds=[];d.slides=[];}}for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs){j.contentMode ||= s.drafts.find(d=>d.id===j.draftId)?.contentMode||'image';if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}}});
+  await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];s.imageJobs ||= [];s.draftGenerationJobs ||= [];for(const j of s.draftGenerationJobs)if(['queued','running'].includes(j.status))Object.assign(j,{status:'failed',phase:'failed',reasonCode:'interrupted',error:'服务已重启，草稿生成已停止；请重新生成，不会自动重复调用 AI',errorStatus:409,completedAt:now()});for(const j of s.imageJobs)if(['queued','generating'].includes(j.status)){j.status='failed';j.error='服务已重启，生成结果未知；未自动重试，请先核对图片服务记录';j.completedAt=now();}for(const d of s.drafts){if(['queued','generating'].includes(d.imageGeneration?.status))Object.assign(d.imageGeneration,{status:'failed',error:'服务已重启，配图任务已停止；请核对后重试'});d.contentMode ||= 'image';d.productAssetIds ||= [];if(d.contentMode==='text'){d.productAssetIds=[];d.slides=[];}}for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs){j.contentMode ||= s.drafts.find(d=>d.id===j.draftId)?.contentMode||'image';if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}}});
   await store.mutate(s=>{for(const r of s.inspirations){
     r.userFields ||= {title:!['未命名灵感','链接灵感'].includes(r.title),text:Boolean(r.text),tags:Boolean(r.tags?.length)};
     r.manualAssets ||= [...(r.assets||[])];
@@ -105,9 +105,33 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     const accountInstruction=`账号：${account.name}。账号类型：${account.type==='official'?'官方':'普通'}。账号定位与备注：${account.notes || '无'}。本次要求：${instruction}。可用自有产品素材：${JSON.stringify(materialCatalog)}。产品素材仅用于外观和品牌参考，不作为功能实测依据。`;
     const data=useAI?await generate(env,productForAI(s),ref,accountInstruction,mode,[...(ref?await imagesFor(ref,root,directory):[]),...await productVisionImages(selected,directory)],fetcher,draftMode):templateDraft(s.product,ref,instruction,draftMode);
     if(method==='ai'&&!useAI)throw new InputError('AI 未配置，请选择本地事实模板',409);
-    const draft={...data,contentMode:draftMode,id:id(),productAssetIds:selected.map(a=>a.id),accountId:account.id,referenceIds:ref?[ref.id]:[],instruction,mode,productVersion:s.product.version,status:'draft',createdAt:now(),updatedAt:now(),history:[],revision:1};
+    const draft={...data,contentMode:draftMode,id:id(),productAssetIds:useAI?[]:selected.map(a=>a.id),imageSourceAssetIds:selected.map(a=>a.id),accountId:account.id,referenceIds:ref?[ref.id]:[],instruction,mode,productVersion:s.product.version,status:'draft',createdAt:now(),updatedAt:now(),history:[],revision:1};
     attachReferenceSources(s,draft,ref);s.drafts.unshift(draft);if(ref)ref.uses++;
     store.event(s,'generation',`[${account.name}] ${draft.method==='ai'?'AI':'本地模板'}生成：${draft.title}`);return draft;
+  }
+  function queueGeneratedDraftImages(s,draft,requestId,{dailyKey:dailyRunKey=null}={}) {
+    if(draft.contentMode==='text'||draft.method!=='ai')return [];
+    if(!imageProviderStatus(env).ready){draft.imageGeneration={status:'unavailable',error:'图片服务暂不可用，请上传图片或稍后生成'};return [];}
+    try{
+      const batch=queueDraftImages(s,draft.id,{revision:draft.revision,count:3,clientRequestId:requestId},{ready:true,allowQueue:true});
+      draft.imageGeneration={status:'queued',batchId:batch.batchId,...(dailyRunKey?{dailyKey:dailyRunKey}:{})};
+      return batch.jobs.map(job=>job.id);
+    }catch(error){draft.imageGeneration={status:'failed',error:error instanceof InputError?error.message:'配图任务未能创建，请稍后生成'};return [];}
+  }
+  function finishGeneratedDraftImages(s,batchId) {
+    const jobs=s.imageJobs.filter(job=>job.batchId===batchId),draft=s.drafts.find(draft=>draft.id===jobs[0]?.draftId);
+    if(!draft||draft.imageGeneration?.batchId!==batchId)return;
+    if(jobs.some(job=>['queued','generating'].includes(job.status))){draft.imageGeneration.status='generating';return;}
+    const complete=jobs.length===3&&new Set(jobs.map(job=>job.assetId)).size===3&&jobs.every(job=>job.status==='completed'&&job.attachStatus==='attached'&&job.attachedRevision===draft.revision);
+    draft.imageGeneration.status=complete?'completed':'failed';
+    if(!complete){draft.imageGeneration.error='部分配图未完成或稿件已修改，请查看配图任务后重试';return;}
+    const key=draft.imageGeneration.dailyKey;if(!key)return;
+    const account=accountById(s,draft.accountId,true),settings=account.settings;
+    if(!account.enabled||account.archived||!settings.enabled||settings.mode!=='automatic'||key!==dailyKey(new Date(),settings.timezone))return;
+    const issues=checks(draft,s.product,s.productAssets);
+    if(issues.length){draft.imageGeneration.publishStatus='review_required';store.event(s,'review',`[${account.name}] 配图已完成，待核对：${draft.title}`);return;}
+    try{draft.approved=true;draft.approvalKind='automatic';newJob(s,draft,now());draft.imageGeneration.publishStatus='scheduled';}
+    catch(error){draft.approved=false;draft.imageGeneration.publishStatus='review_required';store.event(s,'review',`[${account.name}] 配图已完成，请核对后排期：${draft.title}`);}
   }
   function newJob(s,draft,scheduledAt,accountId=draft.accountId) {
     if(accountId!==draft.accountId)throw new InputError('目标账号与草稿所属账号不一致，请先修改草稿账号',409);
@@ -254,16 +278,19 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         const data=execution.method==='ai'?await generate(request.env,request.product,request.reference,instruction,execution.mode,[...images,...productImages],fetcher,execution.contentMode):templateDraft(request.product,request.reference,request.instruction,execution.contentMode);
         for(const proof of files){let info;try{info=await stat(proof.filename);}catch{throw generationError('source_changed','所选素材已删除或移动，请检查后重新生成');}if(info.size!==proof.size||info.mtimeMs!==proof.mtimeMs||info.ino!==proof.ino)throw generationError('source_changed','所选素材已改变，请重新生成');}
         phase='saving';
-        await store.mutate(s=>{const job=requireItem(s.draftGenerationJobs,jobId),current=assertGenerationContext(s,job);job.phase='saving';
+        const imageJobIds=await store.mutate(s=>{const job=requireItem(s.draftGenerationJobs,jobId),current=assertGenerationContext(s,job);job.phase='saving';
           let draft=s.drafts.find(d=>d.generationJobId===job.id);
-          if(!draft){draft={...data,contentMode:job.contentMode,id:id(),generationJobId:job.id,productAssetIds:[...job.productAssetIds],accountId:job.accountId,referenceIds:job.referenceId?[job.referenceId]:[],instruction:job.instruction,mode:job.mode,productVersion:s.product.version,status:'draft',approved:false,createdAt:now(),updatedAt:now(),history:[],revision:1};
+          if(!draft){draft={...data,contentMode:job.contentMode,id:id(),generationJobId:job.id,productAssetIds:job.resolvedMethod==='ai'?[]:[...job.productAssetIds],imageSourceAssetIds:[...job.productAssetIds],accountId:job.accountId,referenceIds:job.referenceId?[job.referenceId]:[],instruction:job.instruction,mode:job.mode,productVersion:s.product.version,status:'draft',approved:false,createdAt:now(),updatedAt:now(),history:[],revision:1};
             attachReferenceSources(s,draft,current.reference);
             if(current.rewrite){draft.rewriteDraftId=current.rewrite.id;draft.rewriteDraftRevision=job.context.rewriteDraftRevision;draft.referenceIds=[...new Set([...(current.rewrite.referenceIds||[]),...draft.referenceIds])];draft.sourceLinks=[...new Map([...(current.rewrite.sourceLinks||[]),...(draft.sourceLinks||[])].map(source=>[(source.platformId||'')+'|'+source.url,structuredClone(source)])).values()];if(current.rewrite.topicId)draft.topicId=current.rewrite.topicId;}
             if(current.chat){draft.sourceLinks=structuredClone(current.chat.sources);draft.discussionId=current.chat.id;if(current.chat.topicId)draft.topicId=current.chat.topicId;current.chat.draftIds ||= [];current.chat.draftIds.push(draft.id);current.chat.updatedAt=now();const topic=s.topicPool.find(t=>t.id===current.chat.topicId);if(topic){topic.status='used';topic.updatedAt=now();}}
             s.drafts.unshift(draft);if(current.reference)current.reference.uses=(current.reference.uses||0)+1;store.event(s,'generation',`[${current.account.name}] ${draft.method==='ai'?'AI':'本地模板'}生成：${draft.title}`);
           }
-          Object.assign(job,{status:'completed',phase:'completed',draftId:draft.id,error:null,reasonCode:null,completedAt:now()});
+          const imageJobIds=queueGeneratedDraftImages(s,draft,'draft-images:'+job.id);
+          Object.assign(job,{status:'completed',phase:'completed',draftId:draft.id,imageBatchId:draft.imageGeneration?.batchId||null,error:null,reasonCode:null,completedAt:now()});
+          return imageJobIds;
         });
+        for(const imageJobId of imageJobIds)scheduleImage(imageJobId);
       }catch(error){await store.mutate(s=>{const job=s.draftGenerationJobs.find(j=>j.id===jobId);if(job&&job.status!=='completed')Object.assign(job,{status:'failed',phase:'failed',...draftGenerationFailure(error,phase),completedAt:now()});});}
     }).catch(error=>console.error('Draft generation queue failed:',error.name));
     draftGenerationQueue=task;draftGenerationPromises.set(jobId,task);task.finally(()=>draftGenerationPromises.delete(jobId));return task;
@@ -581,6 +608,8 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         await store.mutate(async s=>{
           const job=requireItem(s.imageJobs,jobId);
           const hash=createHash('sha256').update(result.bytes).digest('hex');
+          if(job.draftId&&sourceImages.some(source=>createHash('sha256').update(source.bytes).digest('hex')===hash))throw new InputError('图片服务返回了原始参考图，未生成成品配图，请重试',502);
+          if(job.batchId&&s.imageJobs.some(other=>other.id!==job.id&&other.batchId===job.batchId&&other.status==='completed'&&s.productAssets.find(asset=>asset.id===other.assetId)?.sha256===hash))throw new InputError('图片服务返回了重复配图，请重新生成这一张',502);
           let asset=s.productAssets.find(a=>a.kind==='image'&&a.sha256===hash);
           if(!asset){
             asset=await uploadProductAsset(s,directory,{name:`AI-${job.id}.${result.extension}`,kind:'image',data:result.bytes.toString('base64')});
@@ -589,7 +618,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           }
           if(job.draftId&&['test','modelPreview'].includes(imageRole(asset,s.productAssets)))throw new InputError('图片服务返回了测试素材或未加工的模型预览，请重新生成',409);
           job.status='completed';job.assetId=asset.id;job.model=result.model;job.completedAt=now();
-          if(job.batchId)settleDraftImageBatch(s,job.batchId);
+          if(job.batchId){settleDraftImageBatch(s,job.batchId);finishGeneratedDraftImages(s,job.batchId);}
           store.event(s,'image','AI 图片已保存到素材库');
         });
       } catch(error) {
@@ -597,7 +626,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           const job=requireItem(s.imageJobs,jobId);job.status='failed';job.completedAt=now();
           // Provider messages may contain secrets or local paths. Expose only errors from our validated API module.
           job.error=error instanceof InputError?error.message:'图片生成未完成，请检查图片 API 配置或稍后重试';
-          if(job.batchId)settleDraftImageBatch(s,job.batchId);
+          if(job.batchId){settleDraftImageBatch(s,job.batchId);finishGeneratedDraftImages(s,job.batchId);}
           store.event(s,'image','AI 图片生成失败；未自动重试');
         });
       }
@@ -673,6 +702,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           account.dailyHistory.push({date:key,draftId:d.id,contentMode:draftMode});account.dailyHistory=account.dailyHistory.slice(-365);
           const duplicate=s.drafts.some(x=>x.accountId===account.id&&x.id!==d.id&&x.title.replace(/\s/g,'')===d.title.replace(/\s/g,''));
           if(duplicate)d.gaps.push('与该账号已有草稿标题重复，请改写选题');
+          if(draftMode==='image'&&d.method==='ai'){queueGeneratedDraftImages(s,d,'daily-images:'+d.id,{dailyKey:key});store.event(s,d.imageGeneration?.status==='queued'?'image':'review',`[${account.name}] 文案已生成，${d.imageGeneration?.status==='queued'?'正在制作配图':'配图待处理'}：${d.title}`);continue;}
           const issues=checks(d,s.product,s.productAssets);
           if(issues.length||setting.mode==='review'){store.event(s,'review',`[${account.name}] 待人工核对：${d.title}${issues.length?'（'+issues.join('；')+'）':''}`);}
           else {d.approved=true;newJob(s,d,date.toISOString());}
@@ -680,7 +710,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
       syncDefaultSettings(s);
       for(const j of s.jobs.filter(j=>j.status==='scheduled'&&new Date(j.scheduledAt)<=date))await dispatch(s,j);
-    });pumpCreatorSyncs();pumpAnalyses();pumpEditorial();
+    });pumpCreatorSyncs();pumpAnalyses();pumpEditorial();for(const job of store.state.imageJobs.filter(job=>job.status==='queued'))scheduleImage(job.id);
   }
   async function tick(date=new Date()){
     if(ticking)return;ticking=true;

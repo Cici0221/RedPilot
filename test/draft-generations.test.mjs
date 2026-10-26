@@ -200,7 +200,7 @@ test('AI generation can use screenshots and selected own product images while ke
   const asset = await image(f), ref = await source(f, { text: '', files: [{ name: 'reference.png', data: PNG }] });
   const job = await start(f, { referenceId: ref.id, contentMode: 'image', productAssetIds: [asset.id] }), done = await finished(f, job.id);
   assert.equal(done.status, 'completed'); const generated = (await state(f)).drafts.find(item => item.id === done.draftId);
-  assert.deepEqual(generated.referenceIds, [ref.id]); assert.deepEqual(generated.productAssetIds, [asset.id]); assert.equal(generated.contentMode, 'image');
+  assert.deepEqual(generated.referenceIds, [ref.id]); assert.deepEqual(generated.productAssetIds, []); assert.deepEqual(generated.imageSourceAssetIds, [asset.id]); assert.equal(generated.imageGeneration.status, 'unavailable'); assert.equal(generated.contentMode, 'image');
   assert.equal(request.messages[1].content.filter(item => item.type === 'image_url').length, 2);
   assert.equal((await state(f)).imageJobs.length, 0); assert.deepEqual(f.sideEffects, { publish: 0, verify: 0 });
 });

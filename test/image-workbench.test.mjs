@@ -136,13 +136,20 @@ test('explicit image credentials retain priority over main-provider fallback, ev
   const differentServices = { REDPILOT_IMAGE_BASE_URL: 'https://images.example/v1', REDPILOT_AI_BASE_URL: 'https://text.example/v1' };
   for (const [configuration, expected] of [
     [{ ...env, OPENAI_API_KEY: 'fixture-openai', ...differentServices }, 'fixture-image-key'],
-    [{ REDPILOT_IMAGE_API_KEY: ' ', OPENAI_API_KEY: 'fixture-openai', REDPILOT_AI_KEY: 'wrong', ...differentServices }, 'fixture-openai']
+    [{ REDPILOT_IMAGE_API_KEY: ' ', OPENAI_API_KEY: 'fixture-openai', REDPILOT_AI_KEY: 'fixture-shared', REDPILOT_AI_BASE_URL: 'https://images.example/v1', REDPILOT_IMAGE_BASE_URL: 'https://images.example/v1' }, 'fixture-shared']
   ]) {
     await run(async (_url, init) => {
       assert.equal(init.headers.Authorization, `Bearer ${expected}`);
       return response(PNG);
     }, {}, configuration);
   }
+});
+
+test('an unrelated global key cannot enable or reach a third-party image service', async()=>{
+  const configuration={OPENAI_API_KEY:'fixture-unrelated-official-key',REDPILOT_IMAGE_BASE_URL:'https://other-provider.example/v1'};
+  assert.equal(imageProviderStatus(configuration).ready,false);let calls=0;
+  await assert.rejects(run(async()=>{calls++;return response(PNG);},{},configuration),error=>error.status===409);
+  assert.equal(calls,0);
 });
 
 test('main-provider key is reused only for matching normalized service URLs without changing the image model', async () => {

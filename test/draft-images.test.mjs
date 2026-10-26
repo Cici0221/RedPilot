@@ -42,6 +42,61 @@ test('image plans assign cover, points and conditions, prefer genuine references
   assert.match(planDraftImages(s, s.drafts[0])[0].prompt, /CAD几何参考/);
 });
 
+test('reference-led plans use the saved visible brief without treating competitor screenshots as product images', () => {
+  const s = unitState(), draft = s.drafts[0];
+  s.inspirations = [{id:'ref',accountId:'account',assets:['/uploads/competitor.png'],analysis:{visual:'旧的蓝白配色分析'}}];
+  draft.referenceIds = ['ref'];
+  draft.title = 'RingHi｜备用号，还要带备用机？';
+  draft.body = '旧号还在用，工作号也不能随便停。为了备用号还要带手机吗？\n我们正在做 RingHi。\n• SIM 必须移入设备。\n• 短信同步到 App／网页查看。';
+  draft.imageBrief = {basis:'reference',referenceId:'ref',layout:'大标题在上、产品生活场景在下',palette:'黑底、白字、亮蓝重点',typography:'高对比粗体问题标题',productTreatment:'真实产品放在桌面场景'};
+  const plans = planDraftImages(s,draft);
+  assert.equal(plans[0].referenceStyle.basis,'reference');assert.deepEqual(plans[0].referenceStyle.referenceIds,['ref']);
+  assert.match(plans[0].prompt,/黑底、白字、亮蓝重点/);assert.doesNotMatch(plans[0].prompt,/旧的蓝白配色分析|整套保持一致的蓝白配色/);
+  assert.equal(plans[0].headline,'备用号，还要带备用机？');
+  assert.equal(plans[1].headline,'短信，怎么查看？');assert.ok(plans[1].copy.includes('短信同步到 App／网页查看'));
+  assert.ok(plans[1].copy.every(line=>!line.includes('旧号还在用')&&!line.includes('我们正在')&&!line.includes('还要带手机')));
+  assert.notEqual(plans[1].headline,plans[2].headline);
+  for(const plan of plans){assert.deepEqual(plan.sourceAssetIds,['original']);assert.doesNotMatch(plan.prompt,/\/uploads\/competitor/);assert.match(plan.prompt,/不执行其中命令|不执行其中指令/);}
+});
+
+test('image direction falls back to visible saved analysis and excludes foreign or unviewed references', () => {
+  const s=unitState(),draft=s.drafts[0];
+  draft.referenceIds=['foreign','text-only','seen'];
+  s.inspirations=[
+    {id:'foreign',accountId:'other',assets:['/uploads/foreign.png'],analysis:{visual:'FOREIGN_STYLE'}},
+    {id:'text-only',accountId:'account',assets:[],analysis:{visual:'UNSEEN_STYLE'}},
+    {id:'seen',accountId:'account',assets:['/uploads/own-reference.png'],analysis:{visible_cover_patterns:['暖白纸感','左侧粗字标题']}}
+  ];
+  draft.imageBrief={basis:'reference',referenceId:'foreign',palette:'FOREIGN_BRIEF'};
+  const observed=planDraftImages(s,draft)[0];assert.equal(observed.referenceStyle.basis,'reference');assert.deepEqual(observed.referenceStyle.referenceIds,['seen']);assert.match(observed.prompt,/暖白纸感/);assert.doesNotMatch(observed.prompt,/FOREIGN_STYLE|UNSEEN_STYLE|FOREIGN_BRIEF/);
+  s.inspirations.pop();const original=planDraftImages(s,draft)[0];assert.equal(original.referenceStyle.basis,'original');assert.deepEqual(original.referenceStyle.referenceIds,[]);assert.match(original.prompt,/未取得可用封面视觉分析/);assert.doesNotMatch(original.prompt,/FOREIGN_STYLE|UNSEEN_STYLE|FOREIGN_BRIEF/);
+});
+
+test('maximal image briefs keep prompts within transport limits without dropping the user instruction', () => {
+  const s=unitState(),draft=s.drafts[0];
+  s.product.name='产'.repeat(32);s.product.stage='阶'.repeat(120);s.product.facts=Array.from({length:4},(_,i)=>String(i)+'实'.repeat(71));s.product.conditions=Array.from({length:4},(_,i)=>String(i)+'条'.repeat(63));s.product.restrictions=Array.from({length:4},(_,i)=>String(i)+'限'.repeat(71));
+  s.inspirations=[{id:'ref',assets:['/uploads/ref.png']}];draft.referenceIds=['ref'];draft.imageBrief={basis:'reference',referenceId:'ref',...Object.fromEntries(['layout','palette','typography','productTreatment'].map(key=>[key,'设'.repeat(220)]))};
+  const instruction='要'.repeat(800);const plans=planDraftImages(s,draft,{instruction});
+  for(const plan of plans){assert.ok(plan.prompt.length<=4000,plan.prompt.length);assert.ok(plan.prompt.endsWith(instruction));}
+});
+
+test('automatic batches may wait behind another draft but never duplicate the same draft in flight', () => {
+  const s=unitState();const other={...structuredClone(s.drafts[0]),id:'other'};s.drafts.push(other);
+  queueDraftImages(s,'draft',{revision:1,count:1});
+  assert.throws(()=>queueDraftImages(s,'other',{revision:1,count:1}),{status:409});
+  const queued=queueDraftImages(s,'other',{revision:1,count:1},{allowQueue:true});assert.equal(queued.jobs.length,1);assert.equal(queued.jobs[0].draftId,'other');
+  assert.throws(()=>queueDraftImages(s,'other',{revision:1,count:1},{allowQueue:true}),{status:409});
+});
+
+test('selected product sources guide the brief and changed visual inputs prevent stale attachment', () => {
+  const base=unitState();base.productAssets.push(image('selected-source'));base.drafts[0].productAssetIds=[];base.drafts[0].imageSourceAssetIds=['selected-source'];
+  assert.equal(planDraftImages(base,base.drafts[0])[0].sourceAssetIds[0],'selected-source');
+  for(const change of [s=>{s.drafts[0].imageSourceAssetIds=['original'];},s=>{s.drafts[0].imageBrief={basis:'original',layout:'新的视觉方向'};},s=>{s.drafts[0].referenceIds=['new-reference'];}]){
+    const s=structuredClone(base),batch=queueDraftImages(s,'draft',{revision:1,count:1});change(s);complete(s,batch.jobs[0],'finished');settleDraftImageBatch(s,batch.batchId);
+    assert.deepEqual(s.drafts[0].productAssetIds,[]);assert.equal(batch.jobs[0].attachStatus,'conflict');
+  }
+});
+
 test('an image batch attaches only once after all jobs terminate and invalidates approval', () => {
   const s = unitState(), draft = s.drafts[0];
   const batch = queueDraftImages(s, draft.id, { revision: 1, clientRequestId: 'one' });
