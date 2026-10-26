@@ -21,7 +21,7 @@ import { aiReady, analyze, generate, imagesFor, callAI } from './ai.mjs';
 import { fetchTrendBoards } from './trend-sources.mjs';
 import { initEditorial, editorialActive, normalizeBoards, rankedTrends, reportSettings, reportDate, addTopic, createDiscussion, queueReport, buildReport } from './editorial.mjs';
 import { readFeishuSources } from './feishu-reader.mjs';
-import { initFeishu, updateFeishuSettings, queueFeishuSync, feishuDue, finishFeishuSync, productForAI } from './feishu.mjs';
+import { initFeishu, updateFeishuSettings, queueFeishuSync, alignFeishuSources, finishFeishuSync, productForAI } from './feishu.mjs';
 import { importProductAssets, uploadProductAsset, readableAssetFile, publicAsset, selectedProductAssets, productVisionImages, runProductRender, cleanRenderError, imageRole, isAutomaticImage } from './product-assets.mjs';
 import { accountById, createAccount, updateAccount, setDefaultAccount, archiveAccount, saveAccountSettings, syncDefaultSettings } from './accounts.mjs';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -645,7 +645,6 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         const job=queueTrends(s,'daily');dailyTrendJob=job;
         Object.assign(trend,{lastDailyKey:trendKey,lastJobId:job.id,lastAttemptAt:date.toISOString(),status:job.status,lastError:null});
       }
-      if(feishuDue(s,date))queueFeishuSync(s,'automatic',date);
       for(const c of s.creators.filter(c=>c.enabled&&!c.archived)){
         const p=dateParts(date,c.timezone),key=dailyKey(date,c.timezone);
         if(`${p.hour}:${p.minute}`>=c.time&&c.lastDailyKey!==key){c.lastDailyKey=key;queueCreatorSync(s,c.id,'daily');}
@@ -677,7 +676,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
       syncDefaultSettings(s);
       for(const j of s.jobs.filter(j=>j.status==='scheduled'&&new Date(j.scheduledAt)<=date))await dispatch(s,j);
-    });pumpCreatorSyncs();pumpAnalyses();pumpEditorial();pumpFeishu();} finally {ticking=false;}
+    });pumpCreatorSyncs();pumpAnalyses();pumpEditorial();} finally {ticking=false;}
   }
   const server=http.createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Frame-Options','DENY');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
@@ -800,7 +799,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         }
         const result=await store.mutate(async s=>{
           if(req.method==='PUT'&&pathname==='/api/feishu/settings')return updateFeishuSettings(s,b);
-          if(req.method==='POST'&&pathname==='/api/feishu/sync')return queueFeishuSync(s);
+          if(req.method==='POST'&&pathname==='/api/feishu/sync')return queueFeishuSync(s,b);
           if(req.method==='POST'&&pathname==='/api/trends/refresh'){if(b.accountId)accountById(s,b.accountId);return queueTrends(s);}
           if(req.method==='POST'&&pathname==='/api/reports/generate'){const a=accountById(s,b.accountId||s.defaultAccountId);return queueReport(s,a,b.date);}
           const reportSettingRoute=pathname.match(/^\/api\/accounts\/([^/]+)\/report-settings$/);
@@ -854,7 +853,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(s.productRenders.some(j=>j.assetId===asset.id&&['queued','running'].includes(j.status)))throw new InputError('该模型正在渲染，请等待完成',409);
             const job={id:id(),assetId:asset.id,status:'queued',preset:b.preset,createdAt:now()};s.productRenders.unshift(job);return job;
           }
-          if(req.method==='PUT'&&pathname==='/api/product') {s.product=validateProduct(b);s.drafts.forEach(d=>{if(d.status!=='published')d.approved=false;});store.event(s,'product','产品资料已更新，未发布草稿需要重新核对');return s.product;}
+          if(req.method==='PUT'&&pathname==='/api/product') {s.product=validateProduct(b);alignFeishuSources(s);s.drafts.forEach(d=>{if(d.status!=='published')d.approved=false;});store.event(s,'product','产品资料已更新，未发布草稿需要重新核对');return s.product;}
           if(req.method==='PUT'&&pathname==='/api/settings') {const settings=saveAccountSettings(s,s.defaultAccountId,b);store.event(s,'settings','默认账号每日设置已更新');return settings;}
           if(req.method==='POST'&&pathname==='/api/accounts'){const account=createAccount(s,b);store.event(s,'account',`已添加账号：${account.name}`);return account;}
           const accountRoute=pathname.match(/^\/api\/accounts\/([^/]+)(?:\/(default|archive|settings))?$/);
@@ -915,7 +914,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         const reading=result.item||result;if(req.method==='POST'&&reading.linkRead?.status==='queued'&&(pathname==='/api/inspirations'||/^\/api\/inspirations\/[^/]+\/read-link$/.test(pathname)))scheduleLinkRead(reading.id,reading.linkRead.attemptId);
         if(pathname.startsWith('/api/creators')){pumpCreatorSyncs();pumpAnalyses();}
         if(pathname.startsWith('/api/trends')||pathname.startsWith('/api/reports'))pumpEditorial();
-        if(pathname.startsWith('/api/feishu'))pumpFeishu();
+        if(req.method==='POST'&&pathname==='/api/feishu/sync')pumpFeishu();
         return json(res,result);
       }
       if(req.method!=='GET'&&req.method!=='HEAD')throw new InputError('请求不支持',405);

@@ -55,17 +55,21 @@ async function sync(f) {
 }
 
 // Feishu/browser/model calls are injected; no real documents, accounts, or credentials are used.
-test('Feishu settings default to enabled with product sources, validate inputs, and preserve an explicit disabled setting on restart', async t => {
+test('Feishu defaults to manual-only and legacy settings cannot enable automatic reads', async t => {
   let calls = 0;
   const f = await fixture(t, { feishuReader: async () => { calls++; return snapshot(); } }), initial = await state(f);
-  assert.equal(initial.feishuSync.enabled, true); assert.equal(initial.feishuSync.intervalMinutes, 60);
+  assert.equal(initial.feishuSync.enabled, false); assert.equal(initial.feishuSync.nextSyncAt, null);
+  assert.equal(initial.feishuSync.sourceMode, 'product'); assert.equal(initial.feishuSync.intervalMinutes, undefined);
   assert.ok(initial.feishuSync.sourceUrls.every(url => /\.feishu\.cn\//.test(url)));
-  for (const invalid of [{ intervalMinutes: 16 }, { intervalMinutes: 0 }, { enabled: 'yes' }, { sourceUrls: ['https://evil.example/folder'] }, { sourceUrls: ['http://fixture.feishu.cn/docx/Unsafe'] }]) {
+  for (const invalid of [{ intervalMinutes: 16 }, { intervalMinutes: 0 }, { enabled: true }, { enabled: 'yes' }, { sourceUrls: ['https://evil.example/folder'] }, { sourceUrls: ['http://fixture.feishu.cn/docx/Unsafe'] }]) {
     assert.equal((await f.request('feishu/settings', invalid, 'PUT')).status, 400);
   }
-  for (const intervalMinutes of [15, 60, 360, 1440]) assert.equal((await settings(f, { intervalMinutes })).intervalMinutes, intervalMinutes);
+  for (const intervalMinutes of [15, 60, 360, 1440]) {
+    const saved = await settings(f, { intervalMinutes }); assert.equal(saved.intervalMinutes, undefined); assert.equal(saved.nextSyncAt, null);
+  }
   await f.reopen(); const saved = await state(f);
-  assert.equal(saved.feishuSync.enabled, false); assert.equal(saved.feishuSync.intervalMinutes, 1440); assert.equal(calls, 0);
+  assert.equal(saved.feishuSync.enabled, false); assert.equal(calls, 0);
+  assert.deepEqual(saved.product.sources, [FOLDER]);
 });
 
 test('manual synchronization works with automation disabled and never calls an AI provider', async t => {
@@ -151,34 +155,95 @@ test('changing the source configuration rejects an in-flight result from the pre
   assert.deepEqual(current.feishuSync.sourceUrls, [OTHER_FOLDER]);
 });
 
-test('automatic synchronization respects its interval and disabled state while an empty source set never queues work', async t => {
+test('ticks never queue Feishu work, including stale enabled settings; empty sources reject manual sync', async t => {
   let calls = 0; const f = await fixture(t, { feishuReader: async () => { calls++; return snapshot(); } });
-  await settings(f, { enabled: true, intervalMinutes: 15 }); await f.tick(new Date());
-  const first = await waitUntil(async () => { const s = await state(f); return s.feishuJobs.some(job => job.status === 'completed') ? s : false; }, 'automatic synchronization did not finish');
-  assert.equal(calls, 1); assert.equal(first.feishuJobs[0].reason, 'automatic');
-  const next = Date.parse(first.feishuSync.nextSyncAt);
-  await f.tick(new Date(next - 1)); assert.equal(calls, 1);
-  await f.tick(new Date(next + 1)); await waitUntil(async () => calls === 2 && (await state(f)).feishuJobs.filter(job => job.status === 'completed').length === 2, 'next interval was not synchronized');
-  await settings(f, { enabled: false }); await f.tick(new Date(next + 24 * 60 * 60 * 1000)); assert.equal(calls, 2);
-  await settings(f, { enabled: true, sourceUrls: [] }); await f.tick(new Date(next + 48 * 60 * 60 * 1000));
-  assert.equal(calls, 2); assert.equal((await f.request('feishu/sync', {})).status, 400);
+  await settings(f);
+  // An old client or old saved state cannot make the scheduler read documents.
+  await f.store.mutate(s => { s.feishuSync.enabled = true; s.feishuSync.nextSyncAt = '2020-01-01T00:00:00.000Z'; });
+  await f.tick(new Date()); await f.tick(new Date(Date.now() + 48 * 60 * 60 * 1000));
+  assert.equal(calls, 0); assert.equal((await state(f)).feishuJobs.length, 0);
+  await settings(f, { sourceUrls: [] }); await f.tick(new Date(Date.now() + 72 * 60 * 60 * 1000));
+  assert.equal(calls, 0); assert.equal((await f.request('feishu/sync', {})).status, 400);
 });
 
-test('a restarted in-flight Feishu task fails and waits for its next interval instead of replaying immediately', async t => {
+test('restart disables old automatic settings, preserves snapshots, and requires an explicit retry', async t => {
   let calls = 0; const f = await fixture(t, { feishuReader: async () => { calls++; return snapshot(); } });
-  await settings(f, { enabled: true });
+  await settings(f);
   await f.store.mutate(s => {
     s.feishuDocuments.push({ id: 'saved-before-restart', url: DOC, title: '已存资料', text: '重启前的完整正文', complete: true, stale: false, status: 'ready', readAt, sourceUrls: [FOLDER] });
     s.feishuJobs.push({ id: 'interrupted-feishu-sync', status: 'running', sourceUrls: [FOLDER], configVersion: s.feishuSync.configVersion, createdAt: readAt });
-    s.feishuSync.status = 'syncing'; s.feishuSync.nextSyncAt = null;
+    s.feishuSync.status = 'syncing'; s.feishuSync.enabled = true; s.feishuSync.intervalMinutes = 15; s.feishuSync.nextSyncAt = '2020-01-01T00:00:00.000Z';
   });
   await f.reopen(); const current = await state(f);
   assert.equal(current.feishuJobs.find(job => job.id === 'interrupted-feishu-sync').status, 'failed'); assert.equal(current.feishuSync.status, 'failed');
   assert.equal(current.feishuDocuments[0].stale, true); assert.equal(current.feishuDocuments[0].text, '重启前的完整正文'); assert.equal(current.feishuDocuments[0].readAt, readAt);
   assert.equal(productForAI(current).syncedSources[0].stale, true);
-  assert.ok(Date.parse(current.feishuSync.nextSyncAt) > Date.now());
-  await f.tick(new Date()); assert.equal(calls, 0);
-  await f.tick(new Date(Date.parse(current.feishuSync.nextSyncAt) + 1)); await waitUntil(async () => calls === 1 && (await state(f)).feishuJobs.some(job => job.status === 'completed'), 'next scheduled retry did not run');
+  assert.equal(current.feishuSync.enabled, false); assert.equal(current.feishuSync.nextSyncAt, null); assert.equal(current.feishuSync.intervalMinutes, undefined);
+  await f.tick(new Date()); await f.tick(new Date(Date.now() + 48 * 60 * 60 * 1000)); assert.equal(calls, 0);
+  assert.equal((await sync(f)).status, 'completed'); assert.equal(calls, 1);
+  assert.equal((await state(f)).feishuSync.nextSyncAt, null);
+});
+
+test('legacy separate sources merge once, and product-source deletion survives restart and excludes old AI context', async t => {
+  let calls = 0; const f = await fixture(t, { feishuReader: async () => { calls++; return snapshot(); } });
+  await f.store.mutate(s => {
+    s.product.sources = [DOC, 'https://product.example/spec'];
+    s.feishuSync.sourceUrls = [FOLDER, DOC]; delete s.feishuSync.sourceMode;
+    s.feishuSync.enabled = true; s.feishuSync.nextSyncAt = '2020-01-01T00:00:00.000Z';
+  });
+  await f.reopen(); const migrated = await state(f);
+  assert.deepEqual(migrated.product.sources, [DOC, 'https://product.example/spec', FOLDER]);
+  assert.deepEqual(migrated.feishuSync.sourceUrls, [DOC, FOLDER]); assert.equal(calls, 0);
+  await sync(f); const saved = await state(f); assert.equal(saved.feishuDocuments.length, 1);
+  ok(await f.request('product', { ...saved.product, sources: ['https://product.example/spec'] }, 'PUT'));
+  const deleted = await state(f); assert.deepEqual(deleted.feishuSync.sourceUrls, []);
+  assert.equal(deleted.feishuDocuments.length, 1); assert.deepEqual(productForAI(deleted).syncedSources, []);
+  await f.reopen(); const restarted = await state(f);
+  assert.deepEqual(restarted.product.sources, ['https://product.example/spec']); assert.deepEqual(restarted.feishuSync.sourceUrls, []);
+  assert.deepEqual(productForAI(restarted).syncedSources, []); assert.equal(calls, 1);
+});
+
+test('one manual click atomically saves current sources and reads only Feishu without changing other product fields', async t => {
+  let request, calls = 0;
+  const f = await fixture(t, { feishuReader: async input => { request = input; calls++; return snapshot(); } });
+  const original = await state(f), sourceUrls = ['https://product.example/spec', FOLDER + '?from=copy', FOLDER];
+  const job = ok(await f.request('feishu/sync', { sourceUrls }));
+  await waitUntil(async () => (await state(f)).feishuJobs.some(item => item.id === job.id && item.status === 'completed'), 'manual source sync did not finish');
+  const current = await state(f); assert.equal(calls, 1); assert.deepEqual(request.urls, [FOLDER]);
+  assert.deepEqual(current.product.sources, ['https://product.example/spec', FOLDER]); assert.deepEqual(current.feishuSync.sourceUrls, [FOLDER]);
+  assert.equal(current.feishuJobs[0].reason, 'manual'); assert.equal(current.feishuSync.nextSyncAt, null);
+  for (const key of ['name','brand','stage','summary','facts','conditions','restrictions']) assert.deepEqual(current.product[key], original.product[key]);
+  await f.tick(new Date(Date.now() + 48 * 60 * 60 * 1000)); assert.equal(calls, 1);
+});
+
+test('invalid manual sources roll back saved product sources and never enqueue a reader', async t => {
+  let calls = 0; const f = await fixture(t, { feishuReader: async () => { calls++; return snapshot(); } });
+  const original = await state(f);
+  for (const sourceUrls of [[], ['https://product.example/spec'], [FOLDER, 'http://fixture.feishu.cn/docx/UnsafeDocument001'], [FOLDER, 'https://fixture.feishu.cn/file/AttachmentDocument001'], [FOLDER, 'https://user:secret@fixture.feishu.cn/docx/UnsafeDocument001'], [FOLDER, 'https://fixture.feishu.cn:8443/docx/UnsafeDocument001'], 'not-a-list']) {
+    assert.equal((await f.request('feishu/sync', { sourceUrls })).status, 400);
+    const current = await state(f); assert.deepEqual(current.product, original.product); assert.deepEqual(current.feishuSync, original.feishuSync);
+  }
+  assert.equal(calls, 0); assert.equal((await state(f)).feishuJobs.length, 0);
+});
+
+test('saving product sources alone updates the read configuration without running synchronization', async t => {
+  let calls = 0; const f = await fixture(t, { feishuReader: async () => { calls++; return snapshot(); } });
+  const current = await state(f);
+  ok(await f.request('product', { ...current.product, sources: [OTHER_FOLDER, 'https://product.example/spec'] }, 'PUT'));
+  const saved = await state(f); assert.deepEqual(saved.feishuSync.sourceUrls, [OTHER_FOLDER]);
+  await f.tick(new Date(Date.now() + 48 * 60 * 60 * 1000)); assert.equal(calls, 0); assert.equal(saved.feishuJobs.length, 0);
+});
+
+test('a changed-source click during an active sync is rejected without changing saved sources', async t => {
+  let release, calls = 0; const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, { beforeClose: () => release(), feishuReader: async () => { calls++; await gate; return snapshot(); } });
+  const first = ok(await f.request('feishu/sync', { sourceUrls: [FOLDER] }));
+  await waitUntil(async () => calls === 1, 'Feishu reader did not start');
+  assert.equal((await f.request('feishu/sync', { sourceUrls: [OTHER_FOLDER] })).status, 409);
+  const current = await state(f); assert.deepEqual(current.product.sources, [FOLDER]); assert.deepEqual(current.feishuSync.sourceUrls, [FOLDER]);
+  const duplicate = ok(await f.request('feishu/sync', { sourceUrls: [FOLDER] })); assert.equal(duplicate.id, first.id);
+  release(); await waitUntil(async () => (await state(f)).feishuJobs.some(job => job.id === first.id && job.status === 'completed'), 'manual synchronization did not finish');
+  assert.equal(calls, 1);
 });
 
 test('AI receives bounded current-source document text with completeness and stale markers while manual restrictions stay authoritative', async t => {

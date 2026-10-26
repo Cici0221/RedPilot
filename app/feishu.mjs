@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {id,now,InputError,str} from './content.mjs';
+import {id,now,InputError,str,sourceUrl} from './content.mjs';
 import {normalizeFeishuSource} from './feishu-reader.mjs';
 
 const active=job=>['queued','running'].includes(job.status);
@@ -9,52 +9,75 @@ const sourceList=urls=>{
   if(!Array.isArray(urls)||urls.length>20)throw new InputError('飞书来源最多20个');
   return [...new Set(urls.map(normalizeFeishuSource))];
 };
+const productSourceList=urls=>{
+  if(!Array.isArray(urls)||urls.length>20)throw new InputError('资料来源最多20个');
+  return [...new Set(urls.map(value=>{
+    const url=sourceUrl(str(value,2000,true));
+    return /(?:^|\.)(?:feishu\.cn|larksuite\.com)$/i.test(new URL(url).hostname)?normalizeFeishuSource(value):url;
+  }))];
+};
+const feishuSources=urls=>(urls||[]).flatMap(url=>{try{return [normalizeFeishuSource(url)];}catch{return [];}});
+function invalidateProduct(state){state.product.version=id();state.product.updatedAt=now();for(const draft of state.drafts)if(draft.status!=='published')draft.approved=false;}
+export function alignFeishuSources(state){
+  const current=state.feishuSync,sourceUrls=[...new Set(feishuSources(state.product.sources))];
+  const changed=JSON.stringify(current.sourceUrls)!==JSON.stringify(sourceUrls);
+  Object.assign(current,{enabled:false,nextSyncAt:null,sourceMode:'product',sourceUrls});delete current.intervalMinutes;
+  if(changed){
+    current.configVersion=id();current.lastError=null;if(current.status!=='syncing')current.status='idle';
+    for(const doc of state.feishuDocuments)if(!docBelongsTo(doc,sourceUrls)){doc.stale=true;doc.status='unavailable';}
+  }
+  return current;
+}
+function saveProductSources(state,urls){
+  const sources=productSourceList(urls);
+  if(JSON.stringify(state.product.sources)!==JSON.stringify(sources)){state.product.sources=sources;invalidateProduct(state);}
+  return alignFeishuSources(state);
+}
 export function initFeishu(state) {
   const current=state.feishuSync;
-  const defaults=(state.product.sources||[]).flatMap(url=>{try{return [normalizeFeishuSource(url)];}catch{return [];}});
-  state.feishuSync={enabled:true,intervalMinutes:60,sourceUrls:defaults,status:'idle',lastAttemptAt:null,lastSyncAt:null,nextSyncAt:null,lastError:null,configVersion:id(),...current};
+  // Migrate the former independent source form once, keeping its folder links.
+  // Later restarts must not resurrect a source removed from the product form.
+  if(current?.sourceMode!=='product'){
+    const existing=(state.product.sources||[]).map(url=>{try{return normalizeFeishuSource(url);}catch{return url;}});
+    state.product.sources=[...new Set([...existing,...feishuSources(current?.sourceUrls)])];
+  }
+  state.feishuSync={status:'idle',lastAttemptAt:null,lastSyncAt:null,lastError:null,configVersion:id(),...current};
   state.feishuDocuments ||= [];state.feishuJobs ||= [];
+  alignFeishuSources(state);
   let interrupted=false;
-  for(const job of state.feishuJobs)if(active(job)){Object.assign(job,{status:'failed',error:'服务已重启，请稍后同步',completedAt:now()});interrupted=true;}
+  for(const job of state.feishuJobs)if(active(job)){Object.assign(job,{status:'failed',error:'服务已重启，请点击飞书同步重试',completedAt:now()});interrupted=true;}
   if(interrupted||state.feishuSync.status==='syncing'){
-    state.feishuSync.status='failed';state.feishuSync.lastError='服务已重启，保留上次资料，下个周期再试';
-    state.feishuSync.nextSyncAt=new Date(Date.now()+state.feishuSync.intervalMinutes*60000).toISOString();
+    state.feishuSync.status='failed';state.feishuSync.lastError='服务已重启，请点击飞书同步重试';
     for(const doc of state.feishuDocuments)if(docBelongsTo(doc,state.feishuSync.sourceUrls)){doc.stale=true;doc.status='unavailable';}
   }
 }
 export function updateFeishuSettings(state,input) {
-  const current=state.feishuSync,next={...current};
-  if('enabled'in input){if(typeof input.enabled!=='boolean')throw new InputError('自动同步开关不正确');next.enabled=input.enabled;}
-  if('intervalMinutes'in input){if(![15,60,360,1440].includes(input.intervalMinutes))throw new InputError('请选择15分钟、每小时、6小时或每天同步');next.intervalMinutes=input.intervalMinutes;}
-  if('sourceUrls'in input)next.sourceUrls=sourceList(input.sourceUrls);
-  const sourceChanged=JSON.stringify(next.sourceUrls)!==JSON.stringify(current.sourceUrls);
-  if(sourceChanged){next.configVersion=id();next.nextSyncAt=null;next.lastError=null;if(next.status!=='syncing')next.status='idle';}
-  if(!current.enabled&&next.enabled)next.nextSyncAt=null;
-  if(next.intervalMinutes!==current.intervalMinutes&&!sourceChanged)next.nextSyncAt=new Date(Date.now()+next.intervalMinutes*60000).toISOString();
-  state.feishuSync=next;
-  if(sourceChanged){
-    state.product.version=id();state.product.updatedAt=now();for(const d of state.drafts)if(d.status!=='published')d.approved=false;
-    for(const doc of state.feishuDocuments)if(!docBelongsTo(doc,next.sourceUrls)){doc.stale=true;doc.status='unavailable';}
+  if('enabled'in input&&input.enabled!==false)throw new InputError('飞书资料仅支持点击同步');
+  // Accept old clients saving a valid frequency, but never schedule a read.
+  if('intervalMinutes'in input&&![15,60,360,1440].includes(input.intervalMinutes))throw new InputError('同步设置不正确');
+  if('sourceUrls'in input){
+    const sources=sourceList(input.sourceUrls),others=(state.product.sources||[]).filter(url=>!feishuSources([url]).length);
+    return saveProductSources(state,[...others,...sources]);
   }
-  return next;
+  return alignFeishuSources(state);
 }
-export function queueFeishuSync(state,reason='manual',at=new Date()) {
-  const running=state.feishuJobs.find(active);if(running)return running;
-  const settings=state.feishuSync;
-  if(!settings.sourceUrls.length)throw new InputError('请先添加飞书资料来源');
-  const job={id:id(),status:'queued',reason,sourceUrls:[...settings.sourceUrls],configVersion:settings.configVersion,createdAt:at.toISOString()};
+export function queueFeishuSync(state,input={},at=new Date()) {
+  const sources=productSourceList('sourceUrls'in input?input.sourceUrls:state.product.sources);
+  const urls=[...new Set(feishuSources(sources))];
+  if(!urls.length)throw new InputError('请先添加飞书资料来源');
+  const running=state.feishuJobs.find(active);
+  if(running&&JSON.stringify(running.sourceUrls)!==JSON.stringify(urls))throw new InputError('同步进行中，请完成后重试',409);
+  const settings=saveProductSources(state,sources);
+  if(running)return running;
+  const job={id:id(),status:'queued',reason:'manual',sourceUrls:[...settings.sourceUrls],configVersion:settings.configVersion,createdAt:at.toISOString()};
   state.feishuJobs.unshift(job);state.feishuJobs=state.feishuJobs.slice(0,50);
-  settings.status='syncing';settings.lastAttemptAt=at.toISOString();settings.nextSyncAt=new Date(at.valueOf()+settings.intervalMinutes*60000).toISOString();settings.lastError=null;
+  settings.status='syncing';settings.lastAttemptAt=at.toISOString();settings.lastError=null;
   return job;
-}
-export function feishuDue(state,date=new Date()) {
-  const settings=state.feishuSync;
-  return settings.enabled&&settings.sourceUrls.length>0&&!state.feishuJobs.some(active)&&(!validTime(settings.nextSyncAt)||Date.parse(settings.nextSyncAt)<=date.valueOf());
 }
 function docBelongsTo(d,urls){return urls.includes(d.url)||(d.sourceUrls||[]).some(url=>urls.includes(url));}
 export function productForAI(state) {
   let remaining=24000;
-  const sources=state.feishuDocuments.filter(d=>docBelongsTo(d,state.feishuSync.sourceUrls)).slice().sort((a,b)=>(b.changedAt||'').localeCompare(a.changedAt||''));
+  const sources=state.feishuDocuments.filter(d=>docBelongsTo(d,feishuSources(state.product.sources))).slice().sort((a,b)=>(b.changedAt||'').localeCompare(a.changedAt||''));
   const syncedSources=[];
   for(const doc of sources){
     if(!remaining)break;
@@ -104,7 +127,7 @@ export function finishFeishuSync(state,job,result) {
   settings.lastError=complete?null:sourceError||(typeof raw.error==='string'?raw.error.slice(0,400):readable?'部分资料未能完整读取，已保留可用快照':'未读取到飞书正文，请检查 Chrome 登录和文档权限');
   if(readable)settings.lastSyncAt=time;
   settings.sourceResults=sources;
-  settings.nextSyncAt=new Date(Date.now()+settings.intervalMinutes*60000).toISOString();
+  settings.nextSyncAt=null;
   Object.assign(job,{status:complete?'completed':readable?'partial':'failed',error:settings.lastError,added,changed,unchanged,incomplete,documentCount:readDocs.length,completedAt:time});
   if(added||changed){state.product.version=id();state.product.updatedAt=time;for(const draft of state.drafts)if(draft.status!=='published')draft.approved=false;}
 }

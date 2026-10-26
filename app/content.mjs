@@ -29,7 +29,7 @@ export function noteKey(url) {
 export function validateProduct(p) {
   return { name: str(p.name, 80, true), brand: str(p.brand, 80, true), stage: str(p.stage, 500, true),
     summary: str(p.summary, 5000, true), facts: lines(p.facts), conditions: lines(p.conditions),
-    restrictions: lines(p.restrictions), sources: lines(p.sources, 15).map(sourceUrl), version: id(), updatedAt: now() };
+    restrictions: lines(p.restrictions), sources: lines(p.sources, 20).map(sourceUrl), version: id(), updatedAt: now() };
 }
 export function contentMode(value = 'image') {
   if (!['text', 'image'].includes(value)) throw new InputError('稿件类型不正确');
