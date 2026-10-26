@@ -7,6 +7,10 @@ export const editorialActive=job=>['queued','running'].includes(job.status);
 export const titleKey=value=>String(value||'').toLowerCase().replace(/[\p{P}\p{S}\s]+/gu,'');
 const hash=value=>createHash('sha256').update(value).digest('hex').slice(0,24);
 const validTime=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));
+const XHS_TOPICS_SOURCE='https://creator.xiaohongshu.com/new/inspiration';
+const isTopicsBoard=board=>board?.kind==='topics'&&board.platformId==='xiaohongshu'&&board.sourceUrl===XHS_TOPICS_SOURCE;
+const hasRank=value=>Number.isInteger(value)&&value>0&&value<=10000;
+const bestRank=appearances=>{const ranks=appearances.filter(a=>a.kind!=='topics'&&hasRank(a.rank)).map(a=>a.rank);return ranks.length?Math.min(...ranks):null;};
 export function reportSettings(input={},current={}) {
   const settings=validateSettings({...DAILY_REPORT_SCHEDULE,...input,mode:'review'});
   if(Object.entries(DAILY_REPORT_SCHEDULE).some(([key,value])=>settings[key]!==value))throw new InputError('日报固定于每天北京时间 09:00 自动生成，无需调整',409);
@@ -36,24 +40,30 @@ export function normalizeBoards(raw,previous=[]) {
   return TREND_PLATFORMS.map(platform=>{
     const value=raw.find(b=>b?.platformId===platform.id),old=previous.find(b=>b.platformId===platform.id);
     const attemptedAt=now(),status=['ready','partial','needs_login','blocked','unavailable'].includes(value?.status)?value.status:'unavailable';
-    const trusted=value&&isOfficialTrendUrl(platform.id,value.sourceUrl||platform.url);
+    const topics=isTopicsBoard(value),source=value?.sourceUrl||platform.url;
+    const trusted=value&&isOfficialTrendUrl(platform.id,source)&&(topics||value.kind===undefined&&source!==XHS_TOPICS_SOURCE);
     const success=trusted&&['ready','partial'].includes(status)&&Array.isArray(value.items);
     const reasonValue=value&&(value.reasonCode!==undefined||value.error!==undefined)?value:undefined;
-    if(!success)return {platformId:platform.id,name:platform.name,boardName:platform.boardName,sourceUrl:old?.sourceUrl||platform.url,
-      status:trusted?status:'unavailable',items:old?.items||[],fetchedAt:old?.fetchedAt||null,attemptedAt,stale:Boolean(old?.items?.length),
-      ...safeTrendFailure(value&&!trusted?'invalid_source':reasonValue,status)};
+    const identity=old?.items?.length?old:topics?value:old;
+    const fallback=(failure,failureStatus=status)=>({platformId:platform.id,name:platform.name,
+      boardName:isTopicsBoard(identity)?'经典话题':identity?.boardName||platform.boardName,sourceUrl:identity?.sourceUrl||platform.url,
+      ...(isTopicsBoard(identity)?{kind:'topics'}:{}),...(old?.scope?{scope:old.scope}:{}),
+      status:failureStatus,items:old?.items||[],fetchedAt:old?.fetchedAt||null,attemptedAt,
+      ...(value&&isOfficialTrendUrl(platform.id,source)?{attemptedSourceUrl:source}:{}),
+      stale:Boolean(old?.items?.length),...safeTrendFailure(failure,failureStatus)});
+    if(!success)return fallback(value&&!trusted?'invalid_source':reasonValue,trusted?status:'unavailable');
     const items=[],seen=new Set();
     for(const item of value.items.slice(0,60)){
-      if(!item||typeof item.title!=='string'||!item.title.trim()||item.title.length>500||!Number.isInteger(item.rank)||item.rank<1||item.rank>10000||!isOfficialTrendUrl(platform.id,item.url))continue;
-      const key=item.rank+':'+titleKey(item.title);if(seen.has(key))continue;seen.add(key);
-      items.push({id:hash(platform.id+'|'+titleKey(item.title)+'|'+item.url),title:item.title.trim().slice(0,200),url:sourceUrl(item.url),rank:item.rank,heatText:typeof item.heatText==='string'?item.heatText.slice(0,120):''});
+      if(!item||typeof item.title!=='string'||!item.title.trim()||item.title.length>500||!topics&&!hasRank(item.rank)||!isOfficialTrendUrl(platform.id,item.url))continue;
+      const key=topics?titleKey(item.title)+':'+item.url:item.rank+':'+titleKey(item.title);if(seen.has(key))continue;seen.add(key);
+      items.push({id:hash(platform.id+'|'+titleKey(item.title)+'|'+item.url),title:item.title.trim().slice(0,200),url:sourceUrl(item.url),...(!topics?{rank:item.rank}:{}),heatText:typeof item.heatText==='string'?item.heatText.slice(0,120):''});
       if(items.length===30)break;
     }
-    items.sort((a,b)=>a.rank-b.rank);
-    if(!items.length)return {platformId:platform.id,name:platform.name,boardName:platform.boardName,sourceUrl:old?.sourceUrl||platform.url,status:'unavailable',items:old?.items||[],fetchedAt:old?.fetchedAt||null,attemptedAt,stale:Boolean(old?.items?.length),...safeTrendFailure(reasonValue||'invalid_response',status)};
-    return {platformId:platform.id,name:platform.name,boardName:typeof value.boardName==='string'?value.boardName.slice(0,80):platform.boardName,
+    if(!topics)items.sort((a,b)=>a.rank-b.rank);
+    if(!items.length)return fallback(reasonValue||'invalid_response','unavailable');
+    return {platformId:platform.id,name:platform.name,boardName:topics?'经典话题':typeof value.boardName==='string'?value.boardName.slice(0,80):platform.boardName,...(topics?{kind:'topics'}:{}),
       sourceUrl:value.sourceUrl||platform.url,status:items.length===value.items.length?status:'partial',items,
-      fetchedAt:validTime(value.fetchedAt)?value.fetchedAt:attemptedAt,attemptedAt,stale:false,scope:typeof value.scope==='string'?value.scope.slice(0,500):'当前可读取的榜单前30条',...(reasonValue?safeTrendFailure(reasonValue,status):{})};
+      fetchedAt:validTime(value.fetchedAt)?value.fetchedAt:attemptedAt,attemptedAt,stale:false,scope:typeof value.scope==='string'?value.scope.slice(0,500):topics?'官方经典话题；无榜单排名':'当前可读取的榜单前30条',...(reasonValue?safeTrendFailure(reasonValue,status):{})};
   });
 }
 
@@ -77,9 +87,10 @@ export function rankedTrends(state,account) {
   for(const board of state.trendBoards)for(const item of board.items||[]){
     const key=titleKey(item.title);if(!key)continue;
     let group=groups.get(key);if(!group){group={id:hash('trend|'+key),title:item.title,appearances:[],sources:[],sourceIds:[],updatedAt:board.fetchedAt,stale:true};groups.set(key,group);}
-    const appearance={platformId:board.platformId,boardName:board.boardName,rank:item.rank,url:item.url,stale:board.stale===true,fetchedAt:board.fetchedAt};
+    const classification=isTopicsBoard(board)?{kind:'topics'}:hasRank(item.rank)?{rank:item.rank}:{};
+    const appearance={platformId:board.platformId,boardName:board.boardName,...classification,url:item.url,stale:board.stale===true,fetchedAt:board.fetchedAt};
     if(!group.appearances.some(x=>x.platformId===board.platformId&&x.url===item.url)){
-      group.appearances.push(appearance);group.sources.push({title:item.title,url:item.url,platformId:board.platformId,rank:item.rank,fetchedAt:board.fetchedAt,stale:board.stale===true});group.sourceIds.push(item.id);
+      group.appearances.push(appearance);group.sources.push({title:item.title,url:item.url,platformId:board.platformId,...classification,fetchedAt:board.fetchedAt,stale:board.stale===true});group.sourceIds.push(item.id);
     }
     if(!board.stale)group.stale=false;
     if(board.fetchedAt>group.updatedAt)group.updatedAt=board.fetchedAt;
@@ -90,8 +101,16 @@ export function rankedTrends(state,account) {
     const direct=accountWords.filter(w=>contains(group.title,w)),facts=productWords.filter(w=>contains(group.title,w));
     const score=Math.min(10,Math.min(5,accountGroups.length*2.5)+Math.min(2.5,direct.length*1.5)+Math.min(2,productGroups.length*1)+Math.min(1,facts.length*.5));
     const current=group.appearances.filter(a=>!a.stale),positions=current.length?current:group.appearances;
-    return {...group,platformCount:new Set(current.map(a=>a.platformId)).size,bestRank:Math.min(...positions.map(a=>a.rank)),score:Math.round(score*10)/10,reason:accountGroups.length?'命中账号方向：'+accountGroups.join('、'):direct.length?'命中账号关键词：'+direct.slice(0,3).join('、'):productGroups.length?'关联产品资料：'+productGroups.join('、'):'与当前账号方向关联较弱',scoreMethod:'规则匹配；不是平台热度、曝光预测或AI评分'};
-  }).sort((a,b)=>b.score-a.score||b.appearances.length-a.appearances.length||Math.min(...a.appearances.map(x=>x.rank))-Math.min(...b.appearances.map(x=>x.rank))||a.title.localeCompare(b.title));
+    return {...group,platformCount:new Set(current.filter(a=>a.kind!=='topics'&&hasRank(a.rank)).map(a=>a.platformId)).size,bestRank:bestRank(positions),score:Math.round(score*10)/10,reason:accountGroups.length?'命中账号方向：'+accountGroups.join('、'):direct.length?'命中账号关键词：'+direct.slice(0,3).join('、'):productGroups.length?'关联产品资料：'+productGroups.join('、'):'与当前账号方向关联较弱',scoreMethod:'规则匹配；不是平台热度、曝光预测或AI评分'};
+  }).sort((a,b)=>b.score-a.score||b.appearances.length-a.appearances.length||(a.bestRank??Infinity)-(b.bestRank??Infinity)||a.title.localeCompare(b.title));
+}
+
+function knownTopicSource(state,source,accountId){
+  const same=item=>item.url===source.url&&titleKey(item.title)===titleKey(source.title);
+  if((state.trendBoards||[]).some(board=>isTopicsBoard(board)&&(board.items||[]).some(same)))return true;
+  const saved=[...(state.topicPool||[]).filter(topic=>topic.accountId===accountId).flatMap(topic=>topic.sources||[]),
+    ...(state.inspirations||[]).filter(reference=>reference.accountId===accountId).flatMap(reference=>reference.sourceLinks||[])];
+  return saved.some(item=>item.kind==='topics'&&item.platformId==='xiaohongshu'&&same(item));
 }
 
 export function editorialSources(state,input,accountId) {
@@ -107,7 +126,10 @@ export function editorialSources(state,input,accountId) {
     if(!trusted)throw new InputError('来源必须是已验证的平台或资料库链接');
     const source={title,url:safe};
     if(value.platformId!==undefined){if(!TREND_PLATFORMS.some(p=>p.id===value.platformId)||!isOfficialTrendUrl(value.platformId,safe))throw new InputError('来源平台与链接不匹配');source.platformId=value.platformId;}
-    if(value.rank!==undefined){if(!Number.isInteger(value.rank)||value.rank<1||value.rank>10000)throw new InputError('榜单位置不正确');source.rank=value.rank;}
+    const knownTopic=source.platformId==='xiaohongshu'&&knownTopicSource(state,source,accountId);
+    if(value.kind==='topics'&&!knownTopic)throw new InputError('创作话题来源尚未验证');
+    if(knownTopic)source.kind='topics';
+    else if(value.rank!==undefined){if(!hasRank(value.rank))throw new InputError('榜单位置不正确');source.rank=value.rank;}
     if(validTime(value.fetchedAt))source.fetchedAt=value.fetchedAt;
     if(typeof value.stale==='boolean')source.stale=value.stale;
     out.push(source);

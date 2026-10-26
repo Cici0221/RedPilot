@@ -15,6 +15,7 @@ const DOMAINS = Object.freeze({ xiaohongshu: ['xiaohongshu.com', 'xhslink.com', 
 const BY_ID = new Map(TREND_PLATFORMS.map(platform => [platform.id, platform]));
 const LIMIT = 2 * 1024 * 1024;
 const BILI_API = 'https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all';
+const XHS_CLASSIC_TOPICS = 'https://creator.xiaohongshu.com/new/inspiration';
 const STATUSES = new Set(['ready', 'partial', 'needs_login', 'blocked', 'unavailable']);
 const TREND_FAILURES = Object.freeze({
   needs_login: '官方榜单需要登录后读取，请在 Chrome 登录后刷新',
@@ -241,6 +242,72 @@ function browserBoard(platformId, domains) {
   else result.reasonCode = ['xiaohongshu', 'douyin'].includes(platformId) ? 'board_not_exposed' : 'board_not_loaded';
   return result;
 }
+
+// Observed in the official creator centre: each classic-topic title is followed
+// by its participation / view totals. Example-note titles and likes follow later.
+// These are evergreen topics, not a numbered or real-time hot-search ranking.
+export function parseXhsClassicTopics(page) {
+  if (typeof page !== 'string') return [];
+  const lines = page.slice(0, 80000).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const start = lines.findIndex(line => /^经典话题(?:\s|$)/.test(line));
+  if (start < 0) return [];
+  const metrics = /^\d+(?:\.\d+)?(?:万|亿)?人参与\s*[·•]\s*\d+(?:\.\d+)?(?:万|亿)?次浏览$/;
+  const skip = /^(?:经典话题|美食|美妆|时尚|出行|知识|兴趣爱好|加载中|正在加载|暂无数据|\d+(?:\.\d+)?(?:万|亿)?)$/;
+  const seen = new Set(), items = [];
+  for (let index = start + 2; index < lines.length; index++) {
+    if (!metrics.test(lines[index])) continue;
+    const title = lines[index - 1];
+    if (!title || title.length > 200 || skip.test(title) || /人参与|次浏览/.test(title) || seen.has(title)) continue;
+    seen.add(title);
+    items.push({ title, url: 'https://www.xiaohongshu.com/search_result?keyword=' + encodeURIComponent(title), heatText: lines[index] });
+    if (items.length === 30) break;
+  }
+  return items;
+}
+function browserClassicTopics(parseVisibleText) {
+  const source = 'https://creator.xiaohongshu.com/new/inspiration';
+  const result = { status: 'unavailable', kind: 'topics', boardName: '经典话题', items: [], sourceUrl: String(location.href || '') };
+  let url; try { url = new URL(result.sourceUrl); } catch {}
+  if (!url || url.protocol !== 'https:' || url.hostname !== 'creator.xiaohongshu.com' || url.username || url.password || url.port && url.port !== '443') { result.reasonCode = 'invalid_source'; return result; }
+  if (/^\/(?:login|signin|passport)(?:\/|$)/.test(url.pathname)) { result.status = 'needs_login'; result.reasonCode = 'needs_login'; return result; }
+  if (url.pathname !== '/new/inspiration') { result.reasonCode = 'invalid_source'; return result; }
+  result.sourceUrl = source;
+  const page = String(document.body?.innerText || '').slice(0, 80000);
+  const visible = node => node && node.getClientRects().length > 0 && getComputedStyle(node).display !== 'none' && getComputedStyle(node).visibility !== 'hidden';
+  if (/安全验证|访问过于频繁|操作过于频繁|验证后继续|请完成验证|访问异常|请求异常/.test(page)) { result.status = 'blocked'; result.reasonCode = 'verification_required'; return result; }
+  if (Array.from(document.querySelectorAll('.login-modal, .login-container, [role="dialog"]')).some(node => visible(node) && /登录|登入/.test(node.innerText || ''))) { result.status = 'needs_login'; result.reasonCode = 'needs_login'; return result; }
+  const container = document.querySelector('.classic-topics-container');
+  if (!visible(container)) { result.reasonCode = 'board_not_loaded'; return result; }
+  const heading = container.querySelector('.title-container');
+  if (!visible(heading) || !/^经典话题(?:\s|$)/.test(String(heading.innerText || '').trim())) { result.reasonCode = 'board_not_loaded'; return result; }
+  const categories = ['美食', '美妆', '时尚', '出行', '知识', '兴趣爱好'];
+  result.categories = Array.from(container.querySelectorAll('.d-tabs-headers > .d-tabs-header')).map((node, index) => ({ name: String(node.querySelector('h6.d-tabs-header-label')?.innerText || '').trim(), index: index + 1, active: node.classList.contains('active'), visible: visible(node) })).filter(item => item.visible && categories.includes(item.name) && item.index <= 6).map(({ visible, ...item }) => item);
+  result.category = result.categories.find(item => item.active)?.name || '';
+  const cards = Array.from(container.querySelectorAll('.d-tabs-pane .panle-box > div > .panel-container')).filter(visible);
+  result.items = cards.flatMap(card => {
+    const title = card.querySelector(':scope > span.title'), metrics = card.querySelector(':scope > .notes-desc > .notes-num');
+    if (!visible(title) || !visible(metrics)) return [];
+    return parseVisibleText('经典话题\n' + String(title.innerText || '').trim() + '\n' + String(metrics.innerText || '').replace(/\s+/g, ' ').trim());
+  }).slice(0, 30);
+  if (result.items.length) { result.status = 'partial'; result.scope = '官方创作中心当前分类的经典话题；参与和浏览量为累计值，未提供实时名次；条目链接为站内关键词搜索'; }
+  else result.reasonCode = 'board_not_loaded';
+  return result;
+}
+
+function sanitizeClassicTopics(input) {
+  const items = [], seen = new Set();
+  for (const item of Array.isArray(input) ? input : []) {
+    const title = typeof item?.title === 'string' ? item.title.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '';
+    if (!title || title.length > 200 || seen.has(title) || typeof item.heatText !== 'string' || !/^\d+(?:\.\d+)?(?:万|亿)?人参与\s*[·•]\s*\d+(?:\.\d+)?(?:万|亿)?次浏览$/.test(item.heatText.trim())) continue;
+    // The DOM has no detail href. A search link is generated deliberately, never
+    // represented as an extracted topic-detail URL or a source ranking.
+    const url = 'https://www.xiaohongshu.com/search_result?keyword=' + encodeURIComponent(title);
+    if (item.url !== url) continue;
+    seen.add(title); items.push({ title, url, heatText: item.heatText.trim() });
+    if (items.length === 30) break;
+  }
+  return items;
+}
 function proxyBase(env) {
   let url; try { url = new URL(env.REDPILOT_READER_PROXY_URL || 'http://127.0.0.1:3456'); } catch {}
   if (!url || url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new SourceError('unavailable', 'browser_unavailable');
@@ -257,13 +324,16 @@ async function proxyCall(fetcher, base, route, script, timeoutMs) {
   return value;
 }
 async function chromeBoard(platform, env, fetcher, browser, timing) {
+  const topics = platform.kind === 'topics';
+  const topicMetadata = topics ? { kind: 'topics', boardName: '经典话题', sourceUrl: XHS_CLASSIC_TOPICS } : {};
   browser.base ||= proxyBase(env);
   if (!browser.target) {
     const created = await proxyCall(fetcher, browser.base, '/new?url=' + encodeURIComponent(platform.url));
     browser.target = created.targetId;
     if (typeof browser.target !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(browser.target)) throw new SourceError('unavailable', 'browser_unavailable');
   } else await proxyCall(fetcher, browser.base, '/navigate?target=' + encodeURIComponent(browser.target) + '&url=' + encodeURIComponent(platform.url));
-  const deadline = timing.clock() + 8000;
+  const deadline = timing.clock() + (topics ? 15000 : 8000);
+  const attemptLimit = topics ? 38 : 20;
   const remaining = () => Math.max(0, Math.ceil(deadline - timing.clock()));
   const step = async (route, script) => {
     const budget = remaining(); if (budget <= 0) throw new SourceError('unavailable', 'board_not_loaded');
@@ -271,32 +341,55 @@ async function chromeBoard(platform, env, fetcher, browser, timing) {
     catch (error) { if (remaining() <= 0) throw new SourceError('unavailable', 'board_not_loaded'); throw error; }
   };
   const waitAgain = async attempt => {
-    const budget = remaining(); if (attempt >= 20 || budget <= 0) return false;
+    const budget = remaining(); if (attempt >= attemptLimit || budget <= 0) return false;
     await timing.sleep(Math.min(400, budget)); return true;
   };
-  let result, searchOpened = false;
+  let result, searchOpened = false, topicSelection = null;
+  const collectedTopics = [], collectedCategories = new Set();
+  const topicResult = items => ({ status: 'partial', kind: 'topics', boardName: '经典话题', sourceUrl: XHS_CLASSIC_TOPICS, items,
+    scope: `官方创作中心经典话题${collectedCategories.size ? '，已读取' + collectedCategories.size + '个分类（每类最多5条）' : '当前分类'}；参与和浏览量为累计值，未提供实时名次；条目链接为站内关键词搜索` });
   // DOM hydration may finish after document.readyState. Both the deadline and
   // attempt cap bound retries; login and verification are never retried away.
-  for (let attempt = 0; attempt < 21 && remaining() > 0; attempt++) {
+  for (let attempt = 0; attempt <= attemptLimit && remaining() > 0; attempt++) {
     const info = await step('/info?target=' + encodeURIComponent(browser.target));
     if (info.url && info.url !== 'about:blank' && !isOfficialTrendUrl(platform.id, info.url)) throw new SourceError('unavailable', 'invalid_source');
     if (!info.url || info.url === 'about:blank' || info.ready === 'loading') { if (await waitAgain(attempt)) continue; break; }
     if (!isOfficialTrendUrl(platform.id, info.url)) throw new SourceError('unavailable', 'invalid_source');
-    result = (await step('/eval?target=' + encodeURIComponent(browser.target), `(${browserBoard.toString()})(${JSON.stringify(platform.id)},${JSON.stringify(DOMAINS[platform.id])})`)).value;
+    if (topics && info.url === BY_ID.get('xiaohongshu').url) { if (await waitAgain(attempt)) continue; break; }
+    const expression = topics ? `(${browserClassicTopics.toString()})(${parseXhsClassicTopics.toString()})` : `(${browserBoard.toString()})(${JSON.stringify(platform.id)},${JSON.stringify(DOMAINS[platform.id])})`;
+    result = (await step('/eval?target=' + encodeURIComponent(browser.target), expression)).value;
     if (!result || typeof result !== 'object') throw new SourceError('unavailable', 'invalid_response');
     if (!isOfficialTrendUrl(platform.id, result.sourceUrl)) throw new SourceError('unavailable', 'invalid_source');
-    const items = sanitizeItems(platform.id, result.items);
-    if (items.length) return { status: 'partial', sourceUrl: result.sourceUrl, items, scope: '仅当前官方页面DOM可读取的榜单窗口，最多30条，不代表全量榜单' };
-    if (['needs_login', 'blocked'].includes(result.status)) return { status: result.status, sourceUrl: result.sourceUrl, items: [], ...safeTrendFailure(result.status === 'needs_login' ? 'needs_login' : 'verification_required') };
+    if (topics && result.sourceUrl !== XHS_CLASSIC_TOPICS && !/^https:\/\/creator\.xiaohongshu\.com\/(?:login|signin|passport)(?:\/|\?|$)/.test(result.sourceUrl)) throw new SourceError('unavailable', 'invalid_source');
+    const items = topics ? result.kind === 'topics' && result.sourceUrl === XHS_CLASSIC_TOPICS && ['ready', 'partial'].includes(result.status) ? sanitizeClassicTopics(result.items) : [] : sanitizeItems(platform.id, result.items);
+    if (items.length) {
+      if (!topics) return { status: 'partial', sourceUrl: result.sourceUrl, items, scope: '仅当前官方页面DOM可读取的榜单窗口，最多30条，不代表全量榜单' };
+      const categories = Array.isArray(result.categories) ? result.categories.filter(item => ['美食', '美妆', '时尚', '出行', '知识', '兴趣爱好'].includes(item.name) && Number.isInteger(item.index) && item.index >= 1 && item.index <= 6) : [];
+      const signature = JSON.stringify(items.map(item => item.title));
+      if (topicSelection && (result.category !== topicSelection.name || signature === topicSelection.previous)) { if (await waitAgain(attempt)) continue; break; }
+      if (!categories.some(item => item.name === result.category)) return topicResult(items);
+      if (!collectedCategories.has(result.category)) {
+        collectedCategories.add(result.category);
+        for (const item of items.slice(0, 5)) if (!collectedTopics.some(old => old.url === item.url)) collectedTopics.push(item);
+      }
+      const next = categories.find(item => !collectedCategories.has(item.name));
+      if (!next || collectedTopics.length >= 30) return topicResult(collectedTopics.slice(0, 30));
+      topicSelection = { name: next.name, previous: signature };
+      await step('/click?target=' + encodeURIComponent(browser.target), '.classic-topics-container .d-tabs-header:nth-child(' + next.index + ')');
+      if (await waitAgain(attempt)) continue;
+      break;
+    }
+    if (['needs_login', 'blocked'].includes(result.status)) return { status: result.status, sourceUrl: result.sourceUrl, ...topicMetadata, items: [], ...safeTrendFailure(result.status === 'needs_login' ? 'needs_login' : 'verification_required') };
     const failure = safeTrendFailure(result);
-    if (platform.id === 'xiaohongshu' && result.action === 'open_search' && !searchOpened) {
+    if (!topics && platform.id === 'xiaohongshu' && result.action === 'open_search' && !searchOpened) {
       await step('/click?target=' + encodeURIComponent(browser.target), '#search-input');
       searchOpened = true;
     }
-    if (!['board_not_loaded', 'board_not_exposed'].includes(failure.reasonCode)) return { status: 'unavailable', sourceUrl: result.sourceUrl, items: [], ...failure };
+    if (!['board_not_loaded', 'board_not_exposed'].includes(failure.reasonCode)) return { status: 'unavailable', sourceUrl: result.sourceUrl, ...topicMetadata, items: [], ...failure };
     if (!await waitAgain(attempt)) break;
   }
-  return { status: 'unavailable', sourceUrl: platform.url, items: [], ...safeTrendFailure(result || 'board_not_loaded') };
+  if (topics && collectedTopics.length) return topicResult(collectedTopics.slice(0, 30));
+  return { status: 'unavailable', sourceUrl: platform.url, ...topicMetadata, items: [], ...safeTrendFailure(result || 'board_not_loaded') };
 }
 
 export async function fetchTrendBoards({ platformIds } = {}, env = process.env, fetcher = fetch, { sleep = delay, clock = () => performance.now() } = {}) {
@@ -309,6 +402,10 @@ export async function fetchTrendBoards({ platformIds } = {}, env = process.env, 
       const platform = BY_ID.get(platformId); let result, failure;
       try { result = await staticBoard(platform, fetcher); } catch (error) { failure = error; }
       if (!result) try { result = await chromeBoard(platform, env, fetcher, browser, { sleep, clock }); } catch (error) { failure = error; }
+      if (platformId === 'xiaohongshu' && result?.status === 'unavailable' && ['board_not_exposed', 'board_not_loaded'].includes(result.reasonCode)) {
+        try { result = await chromeBoard({ ...platform, url: XHS_CLASSIC_TOPICS, kind: 'topics' }, env, fetcher, browser, { sleep, clock }); }
+        catch (error) { const status = error instanceof SourceError && STATUSES.has(error.status) ? error.status : 'unavailable'; result = { status, kind: 'topics', boardName: '经典话题', sourceUrl: XHS_CLASSIC_TOPICS, items: [], ...safeTrendFailure(error, status) }; }
+      }
       if (!result) { const status = failure instanceof SourceError && STATUSES.has(failure.status) ? failure.status : 'unavailable'; result = { status, items: [], ...safeTrendFailure(failure, status) }; }
       boards.push({ platformId, name: platform.name, boardName: platform.boardName, sourceUrl: result.sourceUrl || platform.url,
         ...result, fetchedAt: new Date().toISOString() });
