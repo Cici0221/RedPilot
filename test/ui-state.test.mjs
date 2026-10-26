@@ -59,8 +59,8 @@ test('generation follows the selected account and operation context',()=>{
 
 test('old standalone routes resolve inside their new workspaces',()=>{
   const view=ui(async()=>response(fixture()));
-  for(const [old,nested,root] of [['trends','library/trends','library'],['creators','library/creators','library'],['images','studio/images','studio'],['calendar','accounts/calendar','accounts']]){
+  for(const [old,nested,root] of [['trends','library/trends','library'],['creators','library/creators','library'],['images','studio','studio'],['calendar','accounts/calendar','accounts']]){
     view.context.destination=old;view.run('nav(destination)');assert.equal(view.context.location.hash,nested);assert.equal(view.run('workspaceRoot()'),root);
-    view.context.destination=nested;view.run('nav(destination)');assert.equal(view.run('page'),old);
+    view.context.destination=nested;view.run('nav(destination)');assert.equal(view.run('page'),old==='images'?'studio':old);
   }
 });

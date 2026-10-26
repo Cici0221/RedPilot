@@ -198,26 +198,300 @@ test('no eligible publication image leaves defaults empty rather than falling ba
   const view=ui({state});assert.deepEqual(Array.from(view.run('recentPhotoIds()')),[]);assert.equal(view.run('defaultWorkbenchImage()'),undefined);assert.match(view.run('assetPicker()'),/请选择或生成配图/);
 });
 
-test('modify-images waits for saving and opens the existing workbench with the draft image',async()=>{
-  const gate=deferred(),view=ui({handle:async(request,{state})=>{
-    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
-    await gate.promise;const result={...request.body,revision:2};state.drafts[0]=result;return response(result);
-  }});view.stubRender();beginEdit(view);assert.match(view.run('studio()'),/data-action="draft-images"/);assert.doesNotMatch(view.run('studio()'),/使用所选产品原图，不叠加标题/);
-  view.run("edit.body='跳转前保存';markDraftChanged()");const pending=view.run('editDraftImages()');await turn();assert.equal(view.run('page'),'studio');
-  gate.resolve();await pending;assert.equal(view.run('page'),'images');assert.equal(view.run('selected'),'d1');assert.equal(view.run('imageSourceId'),'photo');assert.equal(view.run('imageToolTab'),'adjust');assert.equal(view.run('imageAIMode'),'edit');assert.deepEqual(Array.from(view.run('imageReferenceIds')),['photo']);assert.equal(view.requests.some(r=>r.url==='/api/image-jobs'),false);
+test('modify-images saves current input and opens current-image options without leaving the draft or submitting AI',async()=>{
+  const state=fixture();state.productAssets.push({id:'second-photo',name:'第二张配图',kind:'image',mime:'image/png',fileUrl:'/media/second.png',metadata:{}});state.drafts[0].productAssetIds=['photo','second-photo'];
+  const view=ui({state});view.stubRender();beginEdit(view);view.run("slide=1;edit.body='正在输入的正文';markDraftChanged()");
+  await view.run('editDraftImages()');
+  assert.equal(view.run('page'),'studio');assert.equal(view.run('selected'),'d1');assert.equal(view.run('edit.body'),'正在输入的正文');assert.equal(view.run('dirty'),false);
+  assert.equal(view.nodes['#modal'].open,true);assert.match(view.nodes['#modal-content'].innerHTML,/second-photo|second\.png/);assert.deepEqual(view.requests.map(request=>request.url),['/api/drafts/d1']);assert.equal(view.state.drafts[0].body,'正在输入的正文');
 });
 
 test('a draft containing only model previews opens generation without making an AI request',async()=>{
   const state=fixture();state.productAssets.push({id:'model-preview',name:'模型图',kind:'image',mime:'image/png',metadata:{modelAssetId:'cad'}});state.drafts[0].productAssetIds=['model-preview'];
   const view=ui({state});view.stubRender();beginEdit(view);await view.run('editDraftImages()');
-  assert.equal(view.run('imageSourceId'),null);assert.equal(view.run('imageToolTab'),'ai');assert.equal(view.run('imageAIMode'),'generate');assert.equal(view.requests.length,0);
+  assert.equal(view.run('page'),'studio');assert.equal(view.nodes['#modal'].open,true);assert.doesNotMatch(view.nodes['#modal-content'].innerHTML,/value="model-preview"|data-id="model-preview"/);assert.equal(view.requests.length,0);
 });
 
 test('a draft-specific cover stays available to its draft without becoming a new-draft default',async()=>{
   const state=fixture();state.productAssets.unshift({id:'draft-cover',name:'专属成品封面',kind:'image',mime:'image/png',createdAt:'2026-10-26T03:00:00Z',imageRole:'publication',publishable:true,automatic:false,metadata:{usage:'publication',draftId:'d1'}});state.drafts[0].productAssetIds=['draft-cover'];
   const view=ui({state});view.stubRender();beginEdit(view);assert.deepEqual(Array.from(view.run('recentPhotoIds()')),['photo']);assert.equal(view.run('defaultWorkbenchImage().id'),'photo');assert.deepEqual(Array.from(view.run("draftPhotos(S.drafts[0]).map(a=>a.id)")),['draft-cover']);
   assert.equal(view.run("workbenchImages().some(a=>a.id==='test-photo')"),false);assert.equal(view.run("workbenchImages().some(a=>a.id==='draft-cover')"),true);
-  await view.run('editDraftImages()');assert.equal(view.run('imageSourceId'),'draft-cover');assert.equal(view.run('imageToolTab'),'adjust');assert.equal(view.requests.length,0);
+  await view.run('editDraftImages()');assert.equal(view.run('page'),'studio');assert.equal(view.nodes['#modal'].open,true);assert.match(view.nodes['#modal-content'].innerHTML,/draft-cover/);assert.equal(view.requests.length,0);
+});
+
+test('studio keeps image creation beside the current draft without global image tabs or the product icon picker',()=>{
+  const state=fixture();state.productAssets.push({id:'logo',name:'ICON_LIST_SHOULD_NOT_RENDER',kind:'icon',mime:'image/png',metadata:{}});
+  state.imageJobs=[{id:'unrelated-job',draftId:'d2',batchId:'other-batch',status:'completed',assetId:'test-photo',prompt:'GLOBAL_TEST_JOB_SHOULD_NOT_RENDER'}];
+  const view=ui({state});beginEdit(view);const html=view.run('studio()');
+  assert.doesNotMatch(html,/data-page="studio\/images"|class="asset-picker"|ICON_LIST_SHOULD_NOT_RENDER|GLOBAL_TEST_JOB_SHOULD_NOT_RENDER/);
+  assert.match(html,/id="draft-form"/);assert.match(html,/配图/);assert.match(html,/预览并排期/);
+});
+
+test('draft image jobs are scoped to the draft and its newest batch',()=>{
+  const state=fixture();state.imageJobs=[
+    {id:'old',draftId:'d1',batchId:'old-batch',status:'completed',createdAt:'2026-10-26T01:00:00Z'},
+    {id:'new-2',draftId:'d1',batchId:'new-batch',index:1,status:'queued',createdAt:'2026-10-26T02:00:00Z'},
+    {id:'unrelated',draftId:'d2',batchId:'other-batch',status:'generating',createdAt:'2026-10-26T03:00:00Z'},
+    {id:'new-1',draftId:'d1',batchId:'new-batch',index:0,status:'generating',createdAt:'2026-10-26T02:00:00Z'},
+    {id:'legacy-test',status:'completed',assetId:'test-photo',createdAt:'2026-10-26T04:00:00Z'}
+  ];
+  const view=ui({state});beginEdit(view);
+  assert.deepEqual(Array.from(view.run('draftImageJobs().map(job=>job.id)')),['new-1','new-2']);
+  assert.deepEqual(Array.from(view.run("draftImageJobs('d2').map(job=>job.id)")),['unrelated']);
+});
+
+test('retrying one image keeps the other slots and their failure actions in the current image set',()=>{
+  const state=fixture();state.imageJobs=[
+    {id:'first-failed',draftId:'d1',batchId:'original',setId:'set',index:0,status:'failed',createdAt:'2026-10-26T01:00:00Z'},
+    {id:'second-failed',draftId:'d1',batchId:'original',setId:'set',index:1,status:'failed',createdAt:'2026-10-26T01:00:00Z'},
+    {id:'third-completed',draftId:'d1',batchId:'original',setId:'set',index:2,status:'completed',createdAt:'2026-10-26T01:00:00Z'},
+    {id:'first-retry',draftId:'d1',batchId:'retry',setId:'set',index:0,status:'generating',createdAt:'2026-10-26T02:00:00Z'}
+  ];const view=ui({state});beginEdit(view);
+  assert.deepEqual(Array.from(view.run('draftImageJobs().map(job=>job.id)')),['first-retry','second-failed','third-completed']);
+});
+
+test('editing a cover keeps failed and conflicting content images actionable until a whole new set replaces them',()=>{
+  const state=fixture();state.imageJobs=[
+    {id:'original-cover',draftId:'d1',batchId:'original',setId:'original',index:0,status:'completed',attachStatus:'attached',attachMode:'replaceSet',createdAt:'2026-10-26T01:00:00Z'},
+    {id:'body-failed',draftId:'d1',batchId:'original',setId:'original',index:1,status:'failed',attachMode:'replaceSet',createdAt:'2026-10-26T01:00:00Z'},
+    {id:'body-conflict',draftId:'d1',batchId:'original',setId:'original',index:2,status:'completed',attachStatus:'conflict',attachMode:'replaceSet',createdAt:'2026-10-26T01:00:00Z'},
+    {id:'edited-cover',draftId:'d1',batchId:'cover-edit',setId:'cover-edit',index:0,status:'completed',attachStatus:'attached',attachMode:'replaceAsset',createdAt:'2026-10-26T02:00:00Z'},
+    {id:'another-draft-failure',draftId:'d2',batchId:'other',setId:'other',index:0,status:'failed',attachMode:'replaceSet',createdAt:'2026-10-26T03:00:00Z'}
+  ];const view=ui({state});beginEdit(view);
+  assert.deepEqual(Array.from(view.run('draftImageIssues().map(job=>job.id)')).sort(),['body-conflict','body-failed']);
+  const markup=view.run('draftImageProgress()');assert.match(markup,/data-action="draft-image-retry"[^>]*data-id="body-failed"/);assert.match(markup,/data-action="draft-image-adopt"[^>]*data-id="body-conflict"/);assert.doesNotMatch(markup,/another-draft-failure/);
+  view.run("S.imageJobs.push({id:'body-retry',draftId:'d1',batchId:'retry',setId:'original',index:1,status:'generating',attachMode:'retrySlot',createdAt:'2026-10-26T03:00:00Z'})");
+  assert.deepEqual(Array.from(view.run('draftImageIssues().map(job=>job.id)')),['body-conflict']);
+  view.run("S.imageJobs.push({id:'new-full-set',draftId:'d1',batchId:'new',setId:'new',index:0,status:'queued',attachMode:'replaceSet',createdAt:'2026-10-26T04:00:00Z'})");
+  assert.deepEqual(Array.from(view.run('draftImageIssues()')),[]);assert.doesNotMatch(view.run('draftImageProgress()'),/data-id="body-failed"|data-id="body-conflict"/);
+});
+
+test('retrying an uncertain submission reuses its original request identity and payload after editing',async()=>{
+  const state=fixture();let firstSubmission=true;
+  const view=ui({state,handle:(request,{state})=>{
+    if(request.url!=='/api/drafts/d1/images'||request.method!=='POST')return;
+    if(firstSubmission){firstSubmission=false;state.imageJobs.push({id:'accepted-once',draftId:'d1',batchId:'batch',index:0,status:'queued',clientRequestId:request.body.clientRequestId,createdAt:'2026-10-26T01:00:00Z'});return response({error:'结果尚未确认'},502);}
+    return response({batchId:'batch',jobs:state.imageJobs});
+  }});view.stubRender();beginEdit(view);await assert.rejects(view.run('submitDraftImages()'),/结果尚未确认/);
+  view.run("edit.body='请求不确定期间修改的正文';markDraftChanged()");await view.run("handleDraftImageAction('submit-retry')");
+  const submissions=view.requests.filter(request=>request.url.endsWith('/images'));assert.equal(submissions.length,2);assert.deepEqual(submissions[1].body,submissions[0].body);assert.equal(view.state.imageJobs.length,1);assert.equal(view.run('draftImageRequests.size'),0);assert.equal(view.state.drafts[0].body,'请求不确定期间修改的正文');
+});
+
+test('a retry resolved by polling during autosave cannot fall back to a fresh default generation',async()=>{
+  const gate=deferred(),state=fixture();
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    await gate.promise;const result={...request.body,revision:2};state.drafts[0]=result;return response(result);
+  }});view.stubRender();beginEdit(view);
+  view.run("draftImageRequests.set('d1',{payload:{revision:1,count:1,instruction:'只生成封面',clientRequestId:'uncertain-request'},context:{draftId:'d1',revision:1,replaceAssetId:''},error:'结果不确定'});edit.body='重试前的新正文';markDraftChanged()");
+  const pending=view.run("handleDraftImageAction('submit-retry')");await turn();
+  state.imageJobs.push({id:'already-accepted',draftId:'d1',batchId:'old-request',setId:'old-request',index:0,status:'queued',clientRequestId:'uncertain-request',createdAt:'2026-10-26T01:00:00Z'});
+  await view.run('pollDraftImages(true)');assert.equal(view.run('draftImageRequests.size'),0);gate.resolve();await pending;
+  assert.equal(view.requests.some(request=>request.method==='POST'&&request.url.endsWith('/images')),false);assert.equal(state.imageJobs.length,1);assert.equal(state.drafts[0].body,'重试前的新正文');assert.equal(view.run('draftImageSubmitting'),false);
+});
+
+test('definitive generation rejection clears pending retry and refreshes the saved draft',async()=>{
+  const view=ui({handle:(request,{state})=>{
+    if(request.url!=='/api/drafts/d1/images')return;
+    state.drafts[0]={...state.drafts[0],revision:2,title:'服务器上的新版本'};return response({error:'稿件已更新'},409);
+  }});view.stubRender();beginEdit(view);
+  await assert.rejects(view.run('submitDraftImages()'),/稿件已更新/);
+  assert.equal(view.run('draftImageRequests.size'),0);assert.equal(view.run('edit.revision'),2);assert.equal(view.run('edit.title'),'服务器上的新版本');assert.equal(view.run('draftImageSubmitting'),false);assert.equal(view.requests.some(request=>request.url==='/api/state'),true);
+});
+
+test('double-clicking generation while autosave is pending submits only one image request',async()=>{
+  const saveGate=deferred(),imageGate=deferred(),state=fixture();
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url==='/api/drafts/d1'&&request.method==='PUT'){await saveGate.promise;const draft={...request.body,revision:2};state.drafts[0]=draft;return response(draft);}
+    if(request.url==='/api/drafts/d1/images'){
+      await imageGate.promise;const job={id:'once',draftId:'d1',batchId:'batch',setId:'batch',index:0,status:'queued',clientRequestId:request.body.clientRequestId,createdAt:'2026-10-26T01:00:00Z'};state.imageJobs.push(job);return response({batchId:'batch',jobs:[job]});
+    }
+  }});view.stubRender();beginEdit(view);view.run("edit.body='点击前新正文';markDraftChanged()");
+  const first=view.run('submitDraftImages()'),second=view.run('submitDraftImages()');await turn();saveGate.resolve();await turn();
+  assert.equal(view.requests.filter(request=>request.url.endsWith('/images')).length,1);imageGate.resolve();await Promise.all([first,second]);assert.equal(state.imageJobs.length,1);assert.equal(view.run('draftImageSubmitting'),false);
+});
+
+test('switching a text draft to images starts empty rather than borrowing unrelated recent pictures',()=>{
+  const state=fixture();state.drafts[0].contentMode='text';state.drafts[0].productAssetIds=[];state.drafts[0].slides=[];
+  const view=ui({state});view.stubRender();beginEdit(view);view.run("changeDraftMode('image')");
+  assert.equal(view.run('edit.contentMode'),'image');assert.deepEqual(Array.from(view.run('edit.productAssetIds')),[]);assert.equal(view.run('dirty'),true);
+});
+
+test('capturing an image destination waits for autosave and uses the saved revision',async()=>{
+  const gate=deferred(),view=ui({handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    await gate.promise;const result={...request.body,revision:2};state.drafts[0]=result;return response(result);
+  }});view.stubRender();beginEdit(view);view.run("edit.body='生图应使用的新正文';markDraftChanged()");
+  const pending=view.run("captureDraftImageContext('photo')");await turn();assert.equal(view.requests.length,1);assert.equal(view.requests[0].body.body,'生图应使用的新正文');
+  gate.resolve();const destination=await pending;assert.equal(destination.draftId,'d1');assert.equal(destination.revision,2);assert.equal(destination.replaceAssetId,'photo');assert.equal(view.run('dirty'),false);
+});
+
+test('an unsuccessful autosave prevents capturing an image destination',async()=>{
+  const view=ui({handle:request=>request.method==='PUT'?response({error:'保存暂不可用'},503):undefined});view.stubRender();beginEdit(view);view.run("edit.body='保留输入';markDraftChanged()");
+  await assert.rejects(view.run("captureDraftImageContext('photo')"),/保存暂不可用/);
+  assert.equal(view.run('dirty'),true);assert.equal(view.run('edit.body'),'保留输入');assert.equal(view.requests.some(request=>request.url.endsWith('/images')),false);
+});
+
+test('image state synchronization adopts completed images only while the editor is clean',()=>{
+  const view=ui();beginEdit(view);view.run("S.drafts[0]={...S.drafts[0],revision:2,productAssetIds:['new-image']};edit.body='未保存的正文';markDraftChanged();syncDraftImageState()");
+  assert.equal(view.run('edit.body'),'未保存的正文');assert.equal(view.run('edit.revision'),1);assert.deepEqual(Array.from(view.run('edit.productAssetIds')),['photo']);
+  view.run('dirty=false;draftSavePromise=new Promise(()=>{});syncDraftImageState()');assert.equal(view.run('edit.revision'),1);
+  view.run('draftSavePromise=null;syncDraftImageState()');assert.equal(view.run('edit.revision'),2);assert.deepEqual(Array.from(view.run('edit.productAssetIds')),['new-image']);
+});
+
+test('replacing a chosen image preserves its position and the other pictures',async()=>{
+  const state=fixture();for(const id of ['second','third','replacement'])state.productAssets.push({id,name:id,kind:'image',mime:'image/png',fileUrl:'/media/'+id+'.png',metadata:{}});state.drafts[0].productAssetIds=['photo','second','third'];
+  const view=ui({state});view.stubRender();beginEdit(view);await view.run("commitDraftImage('replacement',{draftId:'d1',revision:1,replaceAssetId:'second'})");
+  assert.deepEqual(view.state.drafts[0].productAssetIds,['photo','replacement','third']);assert.equal(view.requests.filter(request=>request.method==='PUT').length,1);assert.equal(view.state.drafts[0].approved,false);
+});
+
+test('an image finishing after switching drafts is committed only to the captured draft',async()=>{
+  const gate=deferred(),state=fixture();state.productAssets.push({id:'new-image',name:'新图',kind:'image',mime:'image/png',fileUrl:'/media/new.png',metadata:{}});
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    await gate.promise;const result={...request.body,revision:2};state.drafts[0]=result;return response(result);
+  }});view.stubRender();beginEdit(view);
+  const pending=view.run("commitDraftImage('new-image',{draftId:'d1',revision:1,replaceAssetId:'photo'})");await turn();beginEdit(view,'d2');
+  gate.resolve();await pending;assert.deepEqual(view.state.drafts[0].productAssetIds,['new-image']);assert.deepEqual(view.state.drafts[1].productAssetIds,['photo']);
+  assert.equal(view.run('selected'),'d2');assert.equal(view.run('edit.id'),'d2');assert.deepEqual(Array.from(view.run('edit.productAssetIds')),['photo']);
+});
+
+test('typing during an image replacement survives the response and the following autosave',async()=>{
+  const gate=deferred(),state=fixture();let firstWrite=true;
+  state.productAssets.push({id:'new-image',name:'新图',kind:'image',mime:'image/png',fileUrl:'/media/new.png',metadata:{}});
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    if(firstWrite){firstWrite=false;await gate.promise;}
+    if(request.body.revision!==state.drafts[0].revision)return response({error:'稿件版本已变化'},409);
+    const result={...request.body,revision:state.drafts[0].revision+1};state.drafts[0]=result;return response(result);
+  }});view.stubRender();beginEdit(view);
+  const pending=view.run("commitDraftImage('new-image',{draftId:'d1',revision:1,replaceAssetId:'photo'})");await turn();view.run("edit.body='替换期间继续写的正文';markDraftChanged()");
+  gate.resolve();await pending;assert.equal(view.run('edit.body'),'替换期间继续写的正文');assert.equal(view.run('dirty'),true);
+  await view.run('flushDraftSave()');assert.equal(view.state.drafts[0].body,'替换期间继续写的正文');assert.deepEqual(view.state.drafts[0].productAssetIds,['new-image']);assert.equal(view.run('dirty'),false);
+});
+
+test('switching drafts while replacement is saving also waits for text typed during that save',async()=>{
+  const gate=deferred(),state=fixture();let firstWrite=true;
+  state.productAssets.push({id:'new-image',name:'新图',kind:'image',mime:'image/png',fileUrl:'/media/new.png',metadata:{}});
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    if(firstWrite){firstWrite=false;await gate.promise;}
+    if(request.body.revision!==state.drafts[0].revision)return response({error:'稿件版本已变化'},409);
+    const result={...request.body,revision:state.drafts[0].revision+1};state.drafts[0]=result;return response(result);
+  }});view.stubRender();beginEdit(view);
+  const replacing=view.run("commitDraftImage('new-image',{draftId:'d1',revision:1,replaceAssetId:'photo'})");await turn();view.run("edit.body='切稿前必须保存的正文';markDraftChanged()");
+  const switching=view.run("switchDraftSelection('d2')");await turn();assert.equal(view.run('selected'),'d1');gate.resolve();await Promise.all([replacing,switching]);
+  assert.equal(view.state.drafts[0].body,'切稿前必须保存的正文');assert.deepEqual(view.state.drafts[0].productAssetIds,['new-image']);assert.equal(view.run('selected'),'d2');assert.equal(view.run('dirty'),false);
+});
+
+test('autosave merges a verified background image attachment and retries without losing local text',async()=>{
+  const state=fixture();let firstWrite=true;
+  const view=ui({state,handle:(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    if(firstWrite){firstWrite=false;state.drafts[0]={...state.drafts[0],revision:2,productAssetIds:['generated-cover']};state.imageJobs.push({id:'completed-image',draftId:'d1',draftRevision:1,attachStatus:'attached',status:'completed',assetId:'generated-cover'});return response({error:'稿件版本已变化'},409);}
+    if(request.body.revision!==state.drafts[0].revision)return response({error:'稿件版本已变化'},409);
+  }});view.stubRender();beginEdit(view);view.run("edit.body='本地正在编辑的新正文';markDraftChanged()");
+  await view.run('flushDraftSave()');
+  const writes=view.requests.filter(request=>request.method==='PUT');assert.equal(writes.length,2);assert.equal(writes[1].body.revision,2);assert.equal(writes[1].body.body,'本地正在编辑的新正文');assert.deepEqual(writes[1].body.productAssetIds,['generated-cover']);
+  assert.equal(view.state.drafts[0].body,'本地正在编辑的新正文');assert.deepEqual(view.state.drafts[0].productAssetIds,['generated-cover']);assert.equal(view.run('dirty'),false);
+});
+
+test('autosave does not hide content conflicts or overwrite a locally edited image order',async()=>{
+  for(const conflict of ['remote-body','local-images','unverified-images']){
+    const state=fixture();const view=ui({state,handle:(request,{state})=>{
+      if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+      state.drafts[0]={...state.drafts[0],revision:2,productAssetIds:['generated-cover'],...(conflict==='remote-body'?{body:'另一窗口修改的正文'}:{})};
+      if(conflict!=='unverified-images')state.imageJobs.push({id:'completed-image',draftId:'d1',draftRevision:1,attachStatus:'attached',status:'completed',assetId:'generated-cover'});
+      return response({error:'稿件版本已变化'},409);
+    }});view.stubRender();beginEdit(view);view.run("edit.body='本地不能丢的内容';markDraftChanged()");if(conflict==='local-images')view.run("edit.productAssetIds=['local-choice']");
+    await assert.rejects(view.run('flushDraftSave()'),/稿件版本已变化/);
+    assert.equal(view.requests.filter(request=>request.method==='PUT').length,1,conflict);assert.equal(view.run('edit.body'),'本地不能丢的内容',conflict);assert.equal(view.run('dirty'),true,conflict);
+    if(conflict==='local-images')assert.deepEqual(Array.from(view.run('edit.productAssetIds')),['local-choice']);
+    if(conflict==='remote-body')assert.equal(view.state.drafts[0].body,'另一窗口修改的正文');
+  }
+});
+
+test('adopting an older generated image preserves text typed while adoption is in flight',async()=>{
+  const gate=deferred(),state=fixture();state.drafts[0].revision=4;state.productAssets.push({id:'generated-cover',name:'已生成图片',kind:'image',mime:'image/png',fileUrl:'/media/generated.png',metadata:{}});
+  state.imageJobs.push({id:'old-generation',draftId:'d1',draftRevision:1,attachStatus:'conflict',status:'completed',assetId:'generated-cover'});
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url==='/api/drafts/d1/images/old-generation/adopt'){
+      await gate.promise;state.drafts[0]={...state.drafts[0],revision:5,productAssetIds:['photo','generated-cover']};state.imageJobs[0].attachStatus='attached';state.imageJobs[0].attachedRevision=5;
+      return response({draft:state.drafts[0],job:state.imageJobs[0]});
+    }
+    if(request.url==='/api/drafts/d1'&&request.method==='PUT'&&request.body.revision!==state.drafts[0].revision)return response({error:'稿件版本已变化'},409);
+  }});view.stubRender();beginEdit(view);
+  const pending=view.run("handleDraftImageAction('adopt','old-generation')");await turn();view.run("edit.body='采用图片时继续写的正文';markDraftChanged()");gate.resolve();await pending;
+  await view.run('flushDraftSave()');assert.equal(view.state.drafts[0].body,'采用图片时继续写的正文');assert.deepEqual(view.state.drafts[0].productAssetIds,['photo','generated-cover']);assert.equal(view.run('dirty'),false);
+});
+
+test('switching to text while an image replacement is in flight remains a text-only draft',async()=>{
+  const gate=deferred(),state=fixture();let firstWrite=true;state.productAssets.push({id:'new-image',name:'新图',kind:'image',mime:'image/png',fileUrl:'/media/new.png',metadata:{}});
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
+    if(firstWrite){firstWrite=false;await gate.promise;}
+    if(request.body.revision!==state.drafts[0].revision)return response({error:'稿件版本已变化'},409);
+    const result={...request.body,revision:state.drafts[0].revision+1};state.drafts[0]=result;return response(result);
+  }});view.stubRender();beginEdit(view);
+  const pending=view.run("commitDraftImage('new-image',{draftId:'d1',revision:1,replaceAssetId:'photo'})");await turn();view.run("changeDraftMode('text')");gate.resolve();await pending;await view.run('flushDraftSave()');
+  assert.equal(view.state.drafts[0].contentMode,'text');assert.deepEqual(view.state.drafts[0].productAssetIds,[]);assert.deepEqual(view.state.drafts[0].slides,[]);assert.equal(view.run('edit.contentMode'),'text');
+});
+
+test('polling current-draft images preserves dirty text and never rerenders the complete editor',async()=>{
+  const state=fixture();state.imageJobs=[{id:'image-job',draftId:'d1',batchId:'batch',index:0,status:'generating',createdAt:'2026-10-26T01:00:00Z'}];
+  const view=ui({state});beginEdit(view);view.nodes['#studio-images']=element();view.run("render=()=>{throw Error('whole editor rerendered')};edit.body='正在输入，光标要保留';markDraftChanged()");
+  await view.run('pollDraftImages()');assert.equal(view.requests.filter(request=>request.url==='/api/state').length,1);assert.equal(view.run('edit.body'),'正在输入，光标要保留');assert.equal(view.run('dirty'),true);assert.match(view.nodes['#studio-images'].innerHTML,/配图/);
+});
+
+test('a crop saved after changing drafts keeps its source lineage and replaces the original image in place',async()=>{
+  const gate=deferred(),state=fixture();state.productAssets.push({id:'second',name:'第二张',kind:'image',mime:'image/png',fileUrl:'/media/second.png',metadata:{}});state.drafts[0].productAssetIds=['photo','second'];
+  const view=ui({state,handle:async(request,{state})=>{
+    if(request.url!=='/api/product-assets/upload')return;
+    await gate.promise;const asset={id:'cropped',name:request.body.name,kind:'image',mime:'image/png',fileUrl:'/media/cropped.png',metadata:{adjustedFromAssetId:request.body.sourceAssetId}};state.productAssets.push(asset);return response(asset);
+  }});view.stubRender();beginEdit(view);view.context.File=File;view.context.FileReader=class{readAsDataURL(){this.result='data:image/png;base64,cG5n';this.onload();}};
+  view.nodes['#image-crop-canvas']=element({toBlob(callback){callback(new Blob(['png'],{type:'image/png'}));}});
+  view.run("draftImageContext={draftId:'d1',revision:1,replaceAssetId:'second'};imageSourceId='second';cropReady=true;drawWorkbenchCanvas=async()=>true");
+  const pending=view.run('saveDraftImageCrop()');await turn();beginEdit(view,'d2');view.run("imageSourceId='photo'");gate.resolve();await pending;
+  assert.equal(view.requests.find(request=>request.url==='/api/product-assets/upload').body.sourceAssetId,'second');
+  assert.deepEqual(view.state.drafts[0].productAssetIds,['photo','cropped']);assert.deepEqual(view.state.drafts[1].productAssetIds,['photo']);assert.equal(view.run('selected'),'d2');assert.equal(view.run('edit.id'),'d2');
+});
+
+test('opening crop preserves the source ratio so portrait covers do not immediately lose their edges',async()=>{
+  for(const [width,height,ratio] of [[1024,1536,'2:3'],[1200,1600,'3:4'],[1024,1024,'1:1'],[1600,1200,'4:3']]){
+    const view=ui();beginEdit(view);const draws=[];view.context.sourceImage={naturalWidth:width,naturalHeight:height};view.run('loadWorkbenchImage=async()=>sourceImage');
+    const canvas=element({getContext(){return {fillRect(){},drawImage(...args){draws.push(args);}};}});view.nodes['#image-crop-canvas']=canvas;view.nodes['#crop-dimensions']=element();view.nodes['#crop-save']=element({disabled:true});view.nodes['#crop-error']=element({hidden:true});
+    await view.run("openDraftImageCrop('photo')");
+    assert.equal(view.run('cropSettings.ratio'),ratio);assert.equal(view.run('page'),'studio');assert.equal(view.nodes['#modal'].open,true);assert.equal(view.nodes['#crop-save'].disabled,false);
+    const [,x,y,drawWidth,drawHeight]=draws.at(-1);assert.equal(x,0,ratio);assert.equal(y,0,ratio);assert.equal(drawWidth,canvas.width,ratio);assert.equal(drawHeight,canvas.height,ratio);
+  }
+});
+
+test('stale image destinations and non-publication assets cannot overwrite a draft',async()=>{
+  for(const scenario of ['stale','test','preview']){
+    const state=fixture();state.productAssets.push({id:'preview',name:'模型预览',kind:'image',mime:'image/png',metadata:{modelAssetId:'model'}});
+    if(scenario==='stale')state.drafts[0].revision=2;
+    const view=ui({state});view.stubRender();beginEdit(view);
+    const target=scenario==='stale'?'photo':scenario==='test'?'test-photo':'preview';view.context.targetId=target;
+    await assert.rejects(view.run("commitDraftImage(targetId,{draftId:'d1',revision:1,replaceAssetId:'photo'})"),/稿件已修改|请选择产品照片或成品配图/);
+    assert.equal(view.requests.filter(request=>request.method==='PUT').length,0,scenario);assert.deepEqual(view.state.drafts[0].productAssetIds,['photo'],scenario);
+  }
+});
+
+test('replacing an image with another already attached image cannot create duplicate slides',async()=>{
+  const state=fixture();state.productAssets.push({id:'second',name:'第二张',kind:'image',mime:'image/png',fileUrl:'/media/second.png',metadata:{}});state.drafts[0].productAssetIds=['photo','second'];
+  const view=ui({state});view.stubRender();beginEdit(view);
+  await assert.rejects(view.run("commitDraftImage('photo',{draftId:'d1',revision:1,replaceAssetId:'second'})"),/已在稿件中/);
+  assert.equal(view.requests.some(request=>request.method==='PUT'),false);assert.deepEqual(view.state.drafts[0].productAssetIds,['photo','second']);
+});
+
+test('image controls reorder and remove by identity without duplicating or dropping other images',async()=>{
+  const state=fixture();for(const id of ['second','third'])state.productAssets.push({id,name:id,kind:'image',mime:'image/png',fileUrl:'/media/'+id+'.png',metadata:{}});state.drafts[0].productAssetIds=['photo','second','third'];
+  const view=ui({state});view.stubRender();beginEdit(view);
+  await view.run("mutateDraftImage('left','third')");assert.deepEqual(Array.from(view.run('draftPhotos(edit).map(asset=>asset.id)')),['photo','third','second']);
+  await view.run("mutateDraftImage('first','second')");assert.deepEqual(Array.from(view.run('draftPhotos(edit).map(asset=>asset.id)')),['second','photo','third']);
+  await view.run("mutateDraftImage('right','second')");assert.deepEqual(Array.from(view.run('draftPhotos(edit).map(asset=>asset.id)')),['photo','second','third']);
+  await view.run("mutateDraftImage('remove','second')");assert.deepEqual(Array.from(view.run('draftPhotos(edit).map(asset=>asset.id)')),['photo','third']);
+  await view.run('flushDraftSave()');assert.deepEqual(view.state.drafts[0].productAssetIds,['photo','third']);
 });
 
 test('failed saves keep input, selection and navigation until a successful retry',async()=>{

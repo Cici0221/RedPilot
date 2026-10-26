@@ -11,6 +11,7 @@ import { createAuth } from './auth.mjs';
 import { createConnections } from './connections.mjs';
 import { createXhsPublisher } from './xhs-publisher.mjs';
 import { imageProviderStatus, validateImageRequest, generateImage } from './image-workbench.mjs';
+import { queueDraftImages, settleDraftImageBatch, adoptDraftImage } from './draft-images.mjs';
 import { receiveModelUpload, saveModelUpload, cleanModelUpload } from './model-uploads.mjs';
 import { inspirationUrl, supportedPageUrl, readReferenceLink } from './link-reader.mjs';
 import { readCreatorFeed, normalizeCreatorInput } from './creator-reader.mjs';
@@ -72,6 +73,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   });
   await store.mutate(s=>initEditorial(s));
   await store.mutate(s=>initFeishu(s));
+  await store.mutate(s=>{for(const batchId of new Set(s.imageJobs.filter(job=>job.draftId&&job.batchId).map(job=>job.batchId)))settleDraftImageBatch(s,batchId);});
   function scopedReference(s,referenceId,accountId){
     if(!referenceId)return null;
     const reference=requireItem(s.inspirations,referenceId);
@@ -556,14 +558,19 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     }).catch(error=>console.error('Creator queue failed:',error.name)).finally(()=>queuedCreators.delete(jobId));
   }
   function pumpCreatorSyncs(){for(const job of store.state.creatorSyncs.filter(j=>j.status==='queued'))scheduleCreatorSync(job.id);}
+  const queuedImages=new Set();
   function scheduleImage(jobId) {
+    if(queuedImages.has(jobId))return;
+    queuedImages.add(jobId);
     imageQueue=imageQueue.then(async()=>{
       if(closing)return;
       try {
         const task=await store.mutate(s=>{
-          const job=requireItem(s.imageJobs,jobId);job.status='generating';job.startedAt=now();
+          const job=requireItem(s.imageJobs,jobId);if(job.status!=='queued')return null;
+          job.status='generating';job.startedAt=now();
           return {request:validateImageRequest(job,s.productAssets),sources:job.sourceAssetIds.map(key=>structuredClone(requireItem(s.productAssets,key)))};
         });
+        if(!task)return;
         const sourceImages=await Promise.all(task.sources.map(async a=>({name:a.name,mime:a.mime,bytes:await readFile(await readableAssetFile(a,directory))})));
         const result=await generateImage(env,{request:task.request,sourceImages},fetcher);
         await store.mutate(async s=>{
@@ -573,9 +580,11 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           if(!asset){
             asset=await uploadProductAsset(s,directory,{name:`AI-${job.id}.${result.extension}`,kind:'image',data:result.bytes.toString('base64')});
             asset.description='AI 生成图片，需人工核对产品外观；不作为实拍或功能验证依据';
-            asset.metadata={...asset.metadata,imageJobId:job.id,sourceAssetIds:job.sourceAssetIds,model:result.model,aiGenerated:true,usage:'publication',...(task.sources.some(source=>imageRole(source,s.productAssets)==='test')?{testOnly:true}:{})};
+            asset.metadata={...asset.metadata,imageJobId:job.id,sourceAssetIds:job.sourceAssetIds,model:result.model,aiGenerated:true,usage:'publication',...(job.draftId?{draftId:job.draftId,accountId:job.accountId,batchId:job.batchId,reusable:false}:{}),...(task.sources.some(source=>imageRole(source,s.productAssets)==='test')?{testOnly:true}:{})};
           }
+          if(job.draftId&&['test','modelPreview'].includes(imageRole(asset,s.productAssets)))throw new InputError('图片服务返回了测试素材或未加工的模型预览，请重新生成',409);
           job.status='completed';job.assetId=asset.id;job.model=result.model;job.completedAt=now();
+          if(job.batchId)settleDraftImageBatch(s,job.batchId);
           store.event(s,'image','AI 图片已保存到素材库');
         });
       } catch(error) {
@@ -583,10 +592,11 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           const job=requireItem(s.imageJobs,jobId);job.status='failed';job.completedAt=now();
           // Provider messages may contain secrets or local paths. Expose only errors from our validated API module.
           job.error=error instanceof InputError?error.message:'图片生成未完成，请检查图片 API 配置或稍后重试';
+          if(job.batchId)settleDraftImageBatch(s,job.batchId);
           store.event(s,'image','AI 图片生成失败；未自动重试');
         });
       }
-    }).catch(error=>console.error('Image queue failed:',error.name));
+    }).catch(error=>console.error('Image queue failed:',error.name)).finally(()=>queuedImages.delete(jobId));
   }
   const render=renderRunner||((args)=>runProductRender(args,root,env));
   function scheduleRender(jobId) {
@@ -818,6 +828,11 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
               return {ok:true};
             }
           }
+          const draftImagesRoute=pathname.match(/^\/api\/drafts\/([^/]+)\/images(?:\/([^/]+)\/(adopt))?$/);
+          if(req.method==='POST'&&draftImagesRoute){
+            if(draftImagesRoute[3])return adoptDraftImage(s,draftImagesRoute[1],draftImagesRoute[2],b);
+            return queueDraftImages(s,draftImagesRoute[1],b,{ready:imageProviderStatus(env).ready});
+          }
           if(req.method==='POST'&&pathname==='/api/image-jobs') {
             const request=validateImageRequest(b,s.productAssets);
             if(!imageProviderStatus(env).ready)throw new InputError('尚未配置 OpenAI 图片 API，请在服务器环境中配置密钥后重启',409);
@@ -896,6 +911,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           }
           throw new InputError('接口不存在',404);
         });if(req.method==='POST'&&/^\/api\/product-assets\/[^/]+\/render$/.test(pathname))scheduleRender(result.id);if(req.method==='POST'&&pathname==='/api/image-jobs')scheduleImage(result.id);
+        if(req.method==='POST'&&/^\/api\/drafts\/[^/]+\/images$/.test(pathname))for(const job of result.jobs)if(job.status==='queued')scheduleImage(job.id);
         const reading=result.item||result;if(req.method==='POST'&&reading.linkRead?.status==='queued'&&(pathname==='/api/inspirations'||/^\/api\/inspirations\/[^/]+\/read-link$/.test(pathname)))scheduleLinkRead(reading.id,reading.linkRead.attemptId);
         if(pathname.startsWith('/api/creators')){pumpCreatorSyncs();pumpAnalyses();}
         if(pathname.startsWith('/api/trends')||pathname.startsWith('/api/reports'))pumpEditorial();
