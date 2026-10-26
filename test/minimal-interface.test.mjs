@@ -80,6 +80,21 @@ test('product editing omits internal rule fields and saving visible copy preserv
   assert.deepEqual(saved.body.conditions,['内部事实前提']);assert.deepEqual(saved.body.restrictions,['内部事实边界']);
 });
 
+test('home omits stored sync notices and housekeeping plans while retaining publication work and matching counts',()=>{
+  const state=fixture(),report=state.operationReports[0];
+  report.status='partial';report.issues=['共用产品资料同步尚未完整完成，旧快照不会被当作新实测依据'];
+  report.plans=[
+    {id:'draft-review',key:'draft:1',kind:'review',title:'处理这篇草稿',done:false,action:{type:'draft',id:'1',route:'#draft/1',label:'打开草稿'}},
+    {id:'sync',key:'sync:feishu',kind:'sync',title:'核对产品资料同步',done:true,action:{type:'product',route:'#product'}},
+    {id:'product',key:'product:v1',kind:'source',title:'例行产品资料检查',done:false,action:{type:'product',route:'#product'}}
+  ];
+  const view=ui(state);view.run("page='overview';workspaceId='secondary';reportDate='2026-10-26'");
+  const html=view.run('reports()');
+  assert.doesNotMatch(html,/资料待确认|共用产品资料同步|旧快照不会|report-issues|部分资料|核对产品资料同步|例行产品资料检查/);
+  assert.match(html,/处理这篇草稿/);assert.match(html,/0 \/ 1/);assert.match(html,/可继续创作的发现/);
+  assert.equal(report.issues.length,1);assert.equal(report.plans.length,3);
+});
+
 test('operations never duplicate the global workspace account switcher',()=>{
   const state=fixture();state.accounts=state.accounts.slice(0,1);const view=ui(state);
   assert.doesNotMatch(view.run('operationsAccountSelect()'),/<select\b/);
