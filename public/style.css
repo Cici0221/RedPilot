@@ -307,6 +307,8 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 .trend-appearances{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:12px}
 .trend-appearances>a,.trend-appearances>span{border:1px solid #e9eef6;background:#f8fbff;color:var(--link-text);border-radius:5px;padding:3px 6px;font-size:var(--type-meta);line-height:1.5;text-decoration:none}
 .trend-board-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px;align-items:start}
+.trend-board-column{display:flex;flex-direction:column;gap:inherit;min-width:0}
+.trend-board-grid>.empty{grid-column:1/-1}
 .trend-board{border:1px solid #e4ebf5;background:#fff;border-radius:11px;min-width:0;overflow:hidden}
 .trend-board-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:16px 14px;border-bottom:1px solid #eef2f7}
 .trend-board-head h3{font-size:var(--type-card);font-weight:500;color:var(--ink);line-height:1.6}
