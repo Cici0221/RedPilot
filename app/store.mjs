@@ -1,7 +1,9 @@
 import { mkdir, readFile, writeFile, rename, open, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { id, now } from './content.mjs';
 import { migrateAccounts } from './accounts.mjs';
+import { migrateWorkspaces, ensureWorkspace, workspaceView } from './workspaces.mjs';
 export async function createStore(root, directory, { legacyBridgeAccountId = '' } = {}) {
   await mkdir(path.join(directory, 'uploads'), {recursive:true});
   const lockPath = path.join(directory, 'server.lock');
@@ -34,13 +36,27 @@ export async function createStore(root, directory, { legacyBridgeAccountId = '' 
         status:'draft',createdAt:now(),updatedAt:now(),history:[],revision:1 }], jobs:[], events:[] };
   }
   migrateAccounts(state, legacyBridgeAccountId);
+  migrateWorkspaces(state);
+  const context = new AsyncLocalStorage();
+  const currentAccountId = () => context.getStore() || state.defaultAccountId;
+  const view = accountId => workspaceView(() => state, accountId);
   let queue = Promise.resolve();
   async function save() {
     const tmp = filename+'.tmp'; await writeFile(tmp, JSON.stringify(state,null,2), {mode:0o600}); await rename(tmp,filename);
   }
   await save();
-  return { get state(){return state;}, directory, save,
-    mutate(fn) { const task = queue.then(async()=>{ const backup = structuredClone(state); try { const result = await fn(state); await save(); return result; } catch(err) { state=backup; throw err; } }); queue=task.catch(()=>{}); return task; },
+  return { get state(){return view(currentAccountId());}, get rootState(){return state;}, directory, save,
+    accountIds(){return state.accounts.map(account=>account.id);},
+    run(accountId,fn){ensureWorkspace(state,accountId);return context.run(accountId,()=>fn(view(accountId)));},
+    mutate(fn) {
+      const accountId=currentAccountId();
+      const task=queue.then(()=>context.run(accountId,async()=>{
+        const backup=structuredClone(state);
+        try { const result=await fn(view(accountId));await save();return result; }
+        catch(err){state=backup;throw err;}
+      }));
+      queue=task.catch(()=>{});return task;
+    },
     event(s,type,message) { s.events.unshift({id:id(),type,message,at:now()}); s.events=s.events.slice(0,200); },
     async close() { await queue; await unlink(lockPath).catch(()=>{}); }
   };

@@ -20,8 +20,8 @@ async function fixture(t,{responder=async()=>response(),release=()=>{}}={}){
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));const base='http://127.0.0.1:'+app.server.address().port;
   const login=await fetch(base+'/api/auth/login',{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify(credentials)});assert.equal(login.status,200);const cookie=login.headers.get('set-cookie').split(';')[0];
   t.after(async()=>{release();await app.close();await rm(directory,{recursive:true,force:true});});
-  return {store:app.store,get calls(){return calls;},async request(endpoint,data,method='POST'){
-    const result=await fetch(base+'/api/'+endpoint,{method,signal:AbortSignal.timeout(5000),headers:{Origin:base,Cookie:cookie,'Content-Type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)})});return {status:result.status,data:await result.json()};}};
+  return {store:app.store,get calls(){return calls;},async request(endpoint,data,method='POST',accountId){
+    const result=await fetch(base+'/api/'+endpoint,{method,signal:AbortSignal.timeout(5000),headers:{Origin:base,Cookie:cookie,'Content-Type':'application/json',...(accountId?{'X-RedPilot-Account':accountId}:{})},...(data===undefined?{}:{body:JSON.stringify(data)})});return {status:result.status,data:await result.json()};}};
 }
 function ok(result){assert.equal(result.status,200,JSON.stringify(result.data));return result.data;}
 const state=async f=>ok(await f.request('state',undefined,'GET'));
@@ -49,6 +49,8 @@ test('rewrites reject another account, unrelated references and template fallbac
   for(const [extra,status,pattern] of [[{accountId:other.id},409,/其他账号/],[{referenceId:reference.id},409,/不属于原稿/],[{method:'template'},400,/需要 AI/],[{instruction:'字'.repeat(2001)},400,/2000/]]){
     const result=await rewrite(f,base,extra);assert.equal(result.status,status,JSON.stringify(result.data));assert.match(result.data.error,pattern);
   }
+  const foreign=await f.request('draft-generations',{rewriteDraftId:base.id,accountId:other.id,instruction:'不能读取其他账号原稿',method:'ai',contentMode:'text'},'POST',other.id);
+  assert.equal(foreign.status,404);
   assert.equal(f.calls,0);const after=await state(f);assert.deepEqual(after.drafts,before.drafts);assert.deepEqual(after.draftGenerationJobs,before.draftGenerationJobs);
 });
 

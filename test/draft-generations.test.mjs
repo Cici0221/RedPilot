@@ -36,16 +36,16 @@ async function fixture(t, { env = aiEnv, fetcher = async () => modelResponse(), 
   t.after(async () => { beforeClose?.(); await app.close(); await rm(directory, { recursive: true, force: true }); });
   return { directory, sideEffects, get store() { return app.store; },
     async reopen() { await app.close(); await open(); },
-    async request(endpoint, data, method = 'POST', { authenticated = true, headers = {} } = {}) {
+    async request(endpoint, data, method = 'POST', { authenticated = true, headers = {}, accountId } = {}) {
       const result = await fetch(base + '/api/' + endpoint, { method, signal: AbortSignal.timeout(5000),
-        headers: { Origin: base, ...(authenticated ? { Cookie: cookie } : {}), 'Content-Type': 'application/json', ...headers },
+        headers: { Origin: base, ...(authenticated ? { Cookie: cookie } : {}), 'Content-Type': 'application/json', ...(accountId ? { 'X-RedPilot-Account': accountId } : {}), ...headers },
         ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
       return { status: result.status, data: await result.json() };
     }
   };
 }
 function ok(result) { assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data; }
-const state = async f => ok(await f.request('state', undefined, 'GET'));
+const state = async (f, accountId) => ok(await f.request('state', undefined, 'GET', { accountId }));
 async function waitUntil(fn, message) {
   for (let n = 0; n < 250; n++) { const value = await fn(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 20)); }
   assert.fail(message);
@@ -54,8 +54,8 @@ async function source(f, extra = {}) { return ok(await f.request('inspirations',
 async function image(f, data = PNG, name = 'test-product.png') { return ok(await f.request('product-assets/upload', { name, kind: 'image', data })); }
 const payload = (extra = {}) => ({ method: 'ai', contentMode: 'text', instruction: '说明适用条件，不编造实测', mode: '综合借鉴', clientRequestId: randomUUID(), ...extra });
 async function start(f, extra = {}) { return ok(await f.request('draft-generations', payload(extra))); }
-async function finished(f, jobId) {
-  return waitUntil(async () => (await state(f)).draftGenerationJobs.find(job => job.id === jobId && ['completed', 'failed'].includes(job.status)), 'draft generation did not finish');
+async function finished(f, jobId, accountId) {
+  return waitUntil(async () => (await state(f, accountId)).draftGenerationJobs.find(job => job.id === jobId && ['completed', 'failed'].includes(job.status)), 'draft generation did not finish');
 }
 
 // All source readers and models are injected; no real documents, credentials or accounts are used.
@@ -164,8 +164,10 @@ test('invalid targets and inputs are rejected before queueing or contacting a mo
   const cases = [[{ accountId: 'missing-account' }, 404], [{ accountId: archived.id }, 409], [{ referenceId: 'missing-reference' }, 404], [{ method: 'invalid' }, 400], [{ contentMode: 'video' }, 400], [{ contentMode: 'image', productAssetIds: ['missing-image'] }, 400]];
   for (const [invalid, status] of cases) assert.equal((await f.request('draft-generations', payload(invalid))).status, status);
   assert.equal((await state(f)).draftGenerationJobs.length, 0); assert.equal(calls, 0);
-  const job = await start(f, { method: 'template', accountId: paused.id }), done = await finished(f, job.id);
-  assert.equal(done.status, 'completed'); assert.equal((await state(f)).drafts.find(item => item.id === done.draftId).accountId, paused.id); assert.equal(calls, 0);
+  ok(await f.request('product', (await state(f)).product, 'PUT', { accountId: paused.id }));
+  const job = ok(await f.request('draft-generations', payload({ method: 'template', accountId: paused.id }), 'POST', { accountId: paused.id })), done = await finished(f, job.id, paused.id);
+  assert.equal(done.status, 'completed'); assert.equal((await state(f, paused.id)).drafts.find(item => item.id === done.draftId).accountId, paused.id); assert.equal(calls, 0);
+  assert.equal((await state(f)).drafts.some(item => item.id === done.draftId), false);
 });
 
 test('URL-only references reuse their pending reader before generating and reading does not block other writes', async t => {

@@ -23,11 +23,11 @@ async function fixture(t,{env={},modelResponder}={}) {
   }
   await open();t.after(async()=>{await app.close();await rm(directory,{recursive:true,force:true});});
   return {get store(){return app.store;},get calls(){return {external:externalCalls,reads};},tick:date=>app.tick(date),async reopen(){await app.close();await open();},
-    async request(url,data,method='POST'){const result=await fetch(base+'/api/'+url,{method,signal:AbortSignal.timeout(5000),headers:{Origin:base,Cookie:cookie,'Content-Type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)})});return {status:result.status,data:await result.json()};}};
+    async request(url,data,method='POST',accountId){const result=await fetch(base+'/api/'+url,{method,signal:AbortSignal.timeout(5000),headers:{Origin:base,Cookie:cookie,'Content-Type':'application/json',...(accountId?{'X-RedPilot-Account':accountId}:{})},...(data===undefined?{}:{body:JSON.stringify(data)})});return {status:result.status,data:await result.json()};}};
 }
 function ok(result){assert.equal(result.status,200,JSON.stringify(result.data));return result.data;}
-const state=async f=>ok(await f.request('state',undefined,'GET'));
-async function topic(f,extra={}){return ok(await f.request('topics',{title:'手机通信话题',sources:[source],sourceIds:['observed-row'],...extra}));}
+const state=async(f,accountId)=>ok(await f.request('state',undefined,'GET',accountId));
+async function topic(f,extra={},accountId){return ok(await f.request('topics',{title:'手机通信话题',sources:[source],sourceIds:['observed-row'],...extra},'POST',accountId));}
 async function draft(f,extra={}){return ok(await f.request('drafts',{method:'template',contentMode:'text',...extra}));}
 const future=()=>new Date(Date.now()+3600000).toISOString();
 async function waitFor(fn){for(let i=0;i<100;i++){const result=await fn();if(result)return result;await new Promise(resolve=>setTimeout(resolve,10));}assert.fail('fixture task did not finish');}
@@ -69,11 +69,12 @@ test('deleted linked collections stay deleted after restart and explicit re-savi
 });
 
 test('the same topic stays distinct across accounts and private references cannot cross generation or discussion boundaries',async t=>{
-  const f=await fixture(t),own=await topic(f),other=ok(await f.request('accounts',{name:'另一个账号',type:'personal'})),second=await topic(f,{accountId:other.id});
+  const f=await fixture(t),own=await topic(f),other=ok(await f.request('accounts',{name:'另一个账号',type:'personal'})),second=await topic(f,{accountId:other.id},other.id);
   assert.notEqual(second.referenceId,own.referenceId);assert.notEqual(second.id,own.id);
-  const current=await state(f);assert.equal(current.inspirations.find(r=>r.id===own.referenceId).accountId,current.defaultAccountId);assert.equal(current.inspirations.find(r=>r.id===second.referenceId).accountId,other.id);
-  const generation=await f.request('draft-generations',{accountId:other.id,referenceId:own.referenceId,method:'template',contentMode:'text'});assert.equal(generation.status,409);assert.match(generation.data.error,/其他账号/);
-  const discussion=await f.request('discussions',{accountId:other.id,title:'不能借用',sources:[{title:'其他账号收藏',url:'#reference/'+own.referenceId}]});assert.equal(discussion.status,409);assert.equal((await state(f)).draftGenerationJobs.length,0);assert.deepEqual(f.calls,{external:0,reads:0});
+  const current=await state(f),otherState=await state(f,other.id);assert.equal(current.inspirations.find(r=>r.id===own.referenceId).accountId,current.defaultAccountId);assert.equal(otherState.inspirations.find(r=>r.id===second.referenceId).accountId,other.id);
+  assert.equal(current.inspirations.some(r=>r.id===second.referenceId),false);assert.equal(otherState.inspirations.some(r=>r.id===own.referenceId),false);
+  const generation=await f.request('draft-generations',{accountId:other.id,referenceId:own.referenceId,method:'template',contentMode:'text'},'POST',other.id);assert.equal(generation.status,404);
+  const discussion=await f.request('discussions',{accountId:other.id,title:'不能借用',sources:[{title:'其他账号收藏',url:'#reference/'+own.referenceId}]},'POST',other.id);assert.equal(discussion.status,404);assert.equal((await state(f,other.id)).draftGenerationJobs.length,0);assert.equal((await state(f)).draftGenerationJobs.length,0);assert.deepEqual(f.calls,{external:0,reads:0});
 });
 
 test('direct source creation uses the existing durable queue and retains provenance without a discussion',async t=>{
@@ -87,7 +88,8 @@ test('daily generation excludes another account’s private source collections',
   let modelInput='';
   const f=await fixture(t,{env:{REDPILOT_AI_KEY:'test-only-unified-key',REDPILOT_AI_MODEL:'offline-model',REDPILOT_AI_BASE_URL:'https://model.example/v1'},modelResponder:async(_url,options)=>{modelInput=options.body;return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({title:'先核对备用号使用条件',body:'产品处于开发内测阶段，使用前请核对设备和手机的联网条件。',tags:['产品开发'],gaps:[],adaptation:'离线夹具'})}}]}));}}),saved=await topic(f),other=ok(await f.request('accounts',{name:'每日小号',type:'personal'}));
   await f.store.mutate(s=>{s.inspirations=s.inspirations.filter(r=>r.id===saved.referenceId);s.feishuSync.enabled=false;s.trendSchedule.enabled=false;for(const account of s.accounts){account.reportSettings.enabled=false;account.settings.enabled=account.id===other.id;account.settings.mode='review';account.settings.imageShare=0;account.settings.time='09:00';account.settings.timezone='Asia/Shanghai';}});
-  const before=(await state(f)).drafts.length;await f.tick(new Date('2030-01-02T01:00:00Z'));const current=await state(f);assert.equal(current.drafts.length,before+1);const generated=current.drafts.find(d=>d.accountId===other.id);assert.ok(generated);assert.deepEqual(generated.referenceIds,[]);assert.equal(current.jobs.length,0);assert.equal(modelInput.includes(saved.referenceId),false);assert.equal(modelInput.includes(source.url),false);assert.deepEqual(f.calls,{external:1,reads:0});
+  ok(await f.request('product',(await state(f)).product,'PUT',other.id));
+  const before=(await state(f)).drafts.length,otherBefore=(await state(f,other.id)).drafts.length;await f.tick(new Date('2030-01-02T01:00:00Z'));const current=await state(f,other.id);assert.equal(current.drafts.length,otherBefore+1);assert.equal((await state(f)).drafts.length,before);const generated=current.drafts.find(d=>d.accountId===other.id);assert.ok(generated);assert.deepEqual(generated.referenceIds,[]);assert.equal(current.jobs.length,0);assert.equal(modelInput.includes(saved.referenceId),false);assert.equal(modelInput.includes(source.url),false);assert.deepEqual(f.calls,{external:1,reads:0});
 });
 
 test('invalid source requests do not leave partial topic or collection records',async t=>{

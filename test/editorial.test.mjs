@@ -31,15 +31,15 @@ async function fixture(t, { env = {}, trendReader = async () => [], fetcher = as
   return {
     get store() { return app.store; }, tick: date => app.tick(date),
     async reopen(nextEnv = currentEnv) { await app.close(); currentEnv = nextEnv; await open(); },
-    async request(url, data, method = 'POST', { authenticated = true, headers = {} } = {}) {
+    async request(url, data, method = 'POST', { authenticated = true, headers = {}, accountId } = {}) {
       const response = await fetch(base + '/api/' + url, { method, signal: AbortSignal.timeout(5000),
-        headers: { Origin: base, ...(authenticated ? { Cookie: cookie } : {}), 'Content-Type': 'application/json', ...headers },
+        headers: { Origin: base, ...(authenticated ? { Cookie: cookie } : {}), 'Content-Type': 'application/json', ...(accountId ? { 'X-RedPilot-Account': accountId } : {}), ...headers },
         ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
       return { status: response.status, data: await response.json() };
     }
   };
 }
-const state = async f => (await f.request('state', undefined, 'GET')).data;
+const state = async (f, accountId) => ok(await f.request('state', undefined, 'GET', { accountId }));
 function ok(result) { assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data; }
 async function waitUntil(fn, message) {
   for (let n = 0; n < 250; n++) { const value = await fn(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 20)); }
@@ -62,7 +62,7 @@ function boards() {
 }
 async function addAccount(f, name = '测试分号', notes = '') { return ok(await f.request('accounts', { name, type: 'personal', notes })); }
 async function createDiscussion(f, accountId, extra = {}) {
-  return ok(await f.request('discussions', { accountId, title: '通信需求讨论', brief: '围绕自有产品已知事实组织内容', sources: [{ title: '真实参考笔记', url: noteUrl }], ...extra }));
+  return ok(await f.request('discussions', { accountId, title: '通信需求讨论', brief: '围绕自有产品已知事实组织内容', sources: [{ title: '真实参考笔记', url: noteUrl }], ...extra }, 'POST', { accountId }));
 }
 async function refresh(f) {
   const job = ok(await f.request('trends/refresh', {}));
@@ -70,9 +70,9 @@ async function refresh(f) {
   return terminal;
 }
 async function reportFor(f, accountId, date = '2026-10-26') {
-  const job = ok(await f.request('reports/generate', { accountId, date }));
+  const job = ok(await f.request('reports/generate', { accountId, date }, 'POST', { accountId }));
   return waitUntil(async () => {
-    const s = await state(f), finished = s.reportJobs.find(item => item.id === job.id && item.status === 'completed');
+    const s = await state(f, accountId), finished = s.reportJobs.find(item => item.id === job.id && item.status === 'completed');
     return finished && s.operationReports.find(report => report.id === finished.reportId);
   }, 'operation report did not finish');
 }
@@ -91,7 +91,7 @@ test('daily trend settings replace legacy custom schedules with Beijing 09:00 an
   await onlyTrendAutomation(f);
   const initial = (await state(f)).trendSchedule;
   assert.equal(initial.enabled, true); assert.equal(initial.time, '09:00'); assert.equal(initial.timezone, 'Asia/Shanghai'); assert.equal(initial.lastDailyKey, null);
-  await f.store.mutate(s => { delete s.trendSchedule; }); await f.reopen();
+  await f.store.mutate(() => { delete f.store.rootState.trendSchedule; }); await f.reopen();
   assert.equal((await state(f)).trendSchedule.time, '09:00');
   await f.store.mutate(s => { Object.assign(s.trendSchedule, { enabled: false, time: '08:15', timezone: 'UTC', lastDailyKey: '2030-01-02' }); }); await f.reopen();
   const migrated = (await state(f)).trendSchedule;
@@ -119,7 +119,10 @@ test('old and new accounts use the fixed daily report schedule while migration p
   await f.tick(new Date('2030-01-03T00:59:59.000Z'));
   assert.equal((await state(f)).reportJobs.length, 0); assert.equal(reads, 0);
   await f.tick(new Date('2030-01-03T01:00:00.000Z'));
-  await waitUntil(async () => (await state(f)).operationReports.length === 2, 'migrated and new account reports did not run at Beijing 09:00');
+  await waitUntil(async () => {
+    const states = await Promise.all([state(f, accountId), state(f, created.id)]);
+    return states.every(s => s.operationReports.length === 1 && s.operationReports[0].accountId === s.workspaceAccountId);
+  }, 'migrated and new account reports did not run at Beijing 09:00');
   assert.equal(reads, 1);
 });
 
@@ -313,14 +316,16 @@ test('account directions produce distinct explainable rule rankings without rewr
   const f = await fixture(t, { trendReader: async () => boards() }), initial = await state(f);
   ok(await f.request(`accounts/${initial.defaultAccountId}`, { notes: '手机双卡通信' }, 'PUT'));
   const traveler = await addAccount(f, '旅行账号', '出境旅行漫游');
-  await refresh(f); const current = await state(f), phone = current.trendMatches[initial.defaultAccountId], travel = current.trendMatches[traveler.id];
+  await refresh(f); const current = await state(f), other = await state(f, traveler.id), phone = current.trendMatches[initial.defaultAccountId], travel = other.trendMatches[traveler.id];
+  assert.deepEqual(Object.keys(current.trendMatches), [initial.defaultAccountId]);
+  assert.deepEqual(Object.keys(other.trendMatches), [traveler.id]);
   assert.equal(phone[0].title, '手机双卡通信'); assert.equal(travel[0].title, '出境旅行漫游');
   for (const match of [...phone, ...travel]) {
     assert.ok(Number.isFinite(match.score) && match.score >= 0 && match.score <= 10);
     assert.ok(match.reason); assert.match(match.scoreMethod, /规则/); assert.match(match.scoreMethod, /不是平台热度/);
     assert.ok(match.appearances.every(appearance => Number.isInteger(appearance.rank)));
   }
-  const topic = ok(await f.request('topics', { accountId: traveler.id, matchId: travel[0].id }));
+  const topic = ok(await f.request('topics', { accountId: traveler.id, matchId: travel[0].id }, 'POST', { accountId: traveler.id }));
   assert.equal(topic.title, travel[0].title); assert.equal(topic.accountId, traveler.id);
   assert.deepEqual(topic.sources, travel[0].sources); assert.deepEqual(topic.sourceIds, travel[0].sourceIds);
 });
@@ -360,14 +365,17 @@ test('topic deduplication is scoped to an account and a discussion cannot attach
   const f = await fixture(t), official = (await state(f)).defaultAccountId, secondary = await addAccount(f);
   const first = ok(await f.request('topics', { accountId: official, title: '通信条件', sources: [] }));
   const duplicate = ok(await f.request('topics', { accountId: official, title: '  通信条件  ', sources: [] }));
-  const other = ok(await f.request('topics', { accountId: secondary.id, title: '通信条件', sources: [] }));
+  const other = ok(await f.request('topics', { accountId: secondary.id, title: '通信条件', sources: [] }, 'POST', { accountId: secondary.id }));
   assert.equal(first.id, duplicate.id); assert.notEqual(first.id, other.id);
   assert.equal(first.accountId, official); assert.equal(other.accountId, secondary.id);
-  const foreign = await f.request('discussions', { accountId: secondary.id, title: '错误关联', topicId: first.id, sources: [] });
-  assert.equal(foreign.status, 409);
+  const foreign = await f.request('discussions', { accountId: secondary.id, title: '错误关联', topicId: first.id, sources: [] }, 'POST', { accountId: secondary.id });
+  assert.equal(foreign.status, 404);
   const own = await createDiscussion(f, official, { topicId: first.id });
   assert.equal(own.topicId, first.id); assert.equal(own.accountId, official);
-  assert.equal((await state(f)).topicPool.filter(topic => topic.title.trim() === '通信条件').length, 2);
+  for (const accountId of [official, secondary.id]) {
+    const topics = (await state(f, accountId)).topicPool.filter(topic => topic.title.trim() === '通信条件');
+    assert.equal(topics.length, 1); assert.equal(topics[0].accountId, accountId);
+  }
 });
 
 test('editorial sources accept official HTTPS and saved product evidence but reject new hostile or insecure URLs', async t => {
@@ -413,15 +421,15 @@ test('daily reports run at Beijing 09:00 once per enabled account and share one 
   const today = new Date('2026-10-26T01:00:00.000Z');
   await f.tick(today);
   const generated = await waitUntil(async () => {
-    const s = await state(f), reports = s.operationReports.filter(report => report.date === '2026-10-26');
-    return reports.length === 2 ? s : false;
+    const states = await Promise.all([state(f, official), state(f, second.id)]);
+    return states.every(s => s.operationReports.filter(report => report.date === '2026-10-26').length === 1) ? states : false;
   }, 'daily reports were not generated for the two enabled accounts');
-  assert.deepEqual(generated.operationReports.map(report => report.accountId).sort(), [official, second.id].sort());
-  assert.equal(reads, 1); assert.equal(externalCalls, 0); assert.equal(generated.jobs.length, 0);
-  for (const accountId of [official, second.id]) assert.equal(generated.accounts.find(account => account.id === accountId).reportSettings.lastDailyKey, '2026-10-26');
-  for (const accountId of [disabled.id, archived.id]) assert.equal(generated.accounts.find(account => account.id === accountId).reportSettings.lastDailyKey, null);
+  assert.deepEqual(generated.flatMap(s => s.operationReports.map(report => report.accountId)).sort(), [official, second.id].sort());
+  assert.equal(reads, 1); assert.equal(externalCalls, 0); assert.ok(generated.every(s => s.jobs.length === 0 && s.operationReports.every(report => report.accountId === s.workspaceAccountId)));
+  for (const accountId of [official, second.id]) assert.equal(generated[0].accounts.find(account => account.id === accountId).reportSettings.lastDailyKey, '2026-10-26');
+  for (const accountId of [disabled.id, archived.id]) assert.equal(generated[0].accounts.find(account => account.id === accountId).reportSettings.lastDailyKey, null);
   await f.tick(today); await f.tick(new Date('2026-10-26T08:00:00.000Z'));
-  assert.equal((await state(f)).reportJobs.length, 2); assert.equal(reads, 1);
+  assert.equal((await state(f, official)).reportJobs.length, 1); assert.equal((await state(f, second.id)).reportJobs.length, 1); assert.equal(reads, 1);
   const manual = await reportFor(f, disabled.id);
   assert.equal(manual.accountId, disabled.id);
 });
@@ -429,10 +437,10 @@ test('daily reports run at Beijing 09:00 once per enabled account and share one 
 test('report generation deduplicates a pending account and date without holding the state lock during collection', async t => {
   let release, reads = 0; const gate = new Promise(resolve => { release = resolve; });
   const f = await fixture(t, { beforeClose: () => release(), trendReader: async () => { reads++; await gate; return boards(); } });
-  const accountId = (await state(f)).defaultAccountId;
-  const first = ok(await f.request('reports/generate', { accountId, date: '2026-10-26' }));
+  const accountId = (await state(f)).defaultAccountId, today = dailyKey(new Date(), 'Asia/Shanghai');
+  const first = ok(await f.request('reports/generate', { accountId, date: today }));
   await waitUntil(async () => reads === 1, 'report collection did not start');
-  const second = ok(await f.request('reports/generate', { accountId, date: '2026-10-26' }));
+  const second = ok(await f.request('reports/generate', { accountId, date: today }));
   assert.equal(second.id, first.id);
   await addAccount(f, '日报等待期间新增账号');
   assert.equal((await state(f)).reportJobs.filter(job => ['queued', 'running'].includes(job.status)).length, 1);
@@ -442,14 +450,17 @@ test('report generation deduplicates a pending account and date without holding 
 
 test('a generated report uses its account evidence and plan completion persists without allowing cross-account discussion links', async t => {
   const f = await fixture(t, { trendReader: async () => boards() }), accountId = (await state(f)).defaultAccountId;
+  const today = dailyKey(new Date(), 'Asia/Shanghai');
   const other = await addAccount(f, '其他账号');
+  let otherDraft;
   await f.store.mutate(s => {
     const seed = s.drafts[0];
-    seed.title = '本账号待办稿'; seed.createdAt = '2026-10-26T00:10:00.000Z';
-    s.drafts.push({ ...structuredClone(seed), id: 'other-account-report-draft', accountId: other.id, title: '绝不能串入本账号日报的草稿' });
+    seed.title = '本账号待办稿'; seed.createdAt = new Date().toISOString();
+    otherDraft = { ...structuredClone(seed), id: 'other-account-report-draft', accountId: other.id, title: '绝不能串入本账号日报的草稿' };
   });
-  const report = await reportFor(f, accountId), serialized = JSON.stringify(report);
-  assert.equal(report.accountId, accountId); assert.equal(report.date, '2026-10-26');
+  await f.store.run(other.id, () => f.store.mutate(s => { s.drafts.push(otherDraft); }));
+  const report = await reportFor(f, accountId, today), serialized = JSON.stringify(report);
+  assert.equal(report.accountId, accountId); assert.equal(report.date, today);
   assert.ok(Array.isArray(report.plans)); assert.ok(report.plans.length > 0); assert.ok(Array.isArray(report.discoveries));
   assert.doesNotMatch(serialized, /绝不能串入本账号日报的草稿|评论42条|增长63%/);
   const plan = report.plans[0]; assert.equal(plan.done, false);
@@ -457,8 +468,8 @@ test('a generated report uses its account evidence and plan completion persists 
   await f.reopen();
   assert.equal((await state(f)).operationReports.find(item => item.id === report.id).plans.find(item => item.id === plan.id).done, true);
   assert.equal((await f.request(`reports/${report.id}/plans/${plan.id}`, { done: 'yes' }, 'PUT')).status, 400);
-  const foreign = await f.request('discussions', { accountId: other.id, title: '跨账号日报', reportId: report.id, sources: [] });
-  assert.equal(foreign.status, 409);
+  const foreign = await f.request('discussions', { accountId: other.id, title: '跨账号日报', reportId: report.id, sources: [] }, 'POST', { accountId: other.id });
+  assert.equal(foreign.status, 404);
 });
 
 test('provider failures retain the user message and mark the discussion failed without fabricating a reply', async t => {
@@ -516,7 +527,7 @@ test('a product change while an AI reply is pending prevents the obsolete assist
 });
 
 test('reports never treat old or future board snapshots as hot topics for a different local report day', async t => {
-  const today = dailyKey(new Date(), 'Asia/Shanghai'), yesterday = dailyKey(new Date(Date.now() - 24 * 60 * 60 * 1000), 'Asia/Shanghai'), currentTime = today + 'T01:00:00.000Z';
+  const today = dailyKey(new Date(), 'Asia/Shanghai'), yesterday = dailyKey(new Date(Date.now() - 24 * 60 * 60 * 1000), 'Asia/Shanghai'), currentTime = new Date().toISOString();
   let fetchedAt = yesterday + 'T01:00:00.000Z', failedWeibo = false;
   const f = await fixture(t, { trendReader: async () => boards().map(board => ({ ...board, fetchedAt, ...(failedWeibo && board.platformId === 'weibo' ? { status: 'unavailable', items: [] } : {}) })) }), accountId = (await state(f)).defaultAccountId;
   const current = await reportFor(f, accountId, today);
@@ -583,11 +594,12 @@ test('a discussion template draft belongs to its session account and preserves t
   let calls = 0;
   const f = await fixture(t, { fetcher: async () => { calls++; throw Error('template drafts must not call AI'); } });
   const account = await addAccount(f, '讨论草稿账号'), source = { title: '参考结构', url: noteUrl };
-  const topic = ok(await f.request('topics', { accountId: account.id, title: '双卡适用条件', sources: [source] }));
+  ok(await f.request('product', (await state(f)).product, 'PUT', { accountId: account.id }));
+  const topic = ok(await f.request('topics', { accountId: account.id, title: '双卡适用条件', sources: [source] }, 'POST', { accountId: account.id }));
   const discussion = await createDiscussion(f, account.id, { topicId: topic.id, sources: [source] });
-  const draft = ok(await f.request(`discussions/${discussion.id}/draft`, { contentMode: 'text', method: 'template' }));
+  const draft = ok(await f.request(`discussions/${discussion.id}/draft`, { contentMode: 'text', method: 'template' }, 'POST', { accountId: account.id }));
   assert.equal(draft.accountId, account.id); assert.equal(draft.discussionId, discussion.id); assert.equal(draft.topicId, topic.id);
   assert.equal(draft.contentMode, 'text'); assert.deepEqual(draft.slides, []); assert.deepEqual(draft.productAssetIds, []);
   assert.deepEqual(draft.sourceLinks, [source]); assert.equal(draft.status, 'draft'); assert.equal(calls, 0);
-  assert.equal((await state(f)).jobs.length, 0);
+  assert.equal((await state(f, account.id)).jobs.length, 0); assert.equal((await state(f)).drafts.some(item => item.id === draft.id), false);
 });

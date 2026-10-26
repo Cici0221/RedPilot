@@ -50,16 +50,16 @@ test('timed out polling releases its flag and keeps a retryable task',async()=>{
   assert.match(view.nodes['#draft-generation-status'].innerHTML,/状态读取超时/);assert.match(view.nodes['#draft-generation-status'].innerHTML,/重试同步/);
 });
 
-test('generation follows the selected account and operation context',()=>{
+test('generation follows the current workspace across every page',()=>{
   const view=ui(async()=>response(fixture()));
-  assert.equal(view.run("page='library';accountFilter='secondary';generationAccountId()"),'secondary');
-  assert.equal(view.run("page='trends';operationsAccountId='official';generationAccountId()"),'official');
-  assert.equal(view.run("page='library';accountFilter='all';generationAccountId()"),'official');
+  assert.equal(view.run("workspaceId='secondary';page='library';accountFilter='official';generationAccountId()"),'secondary');
+  assert.equal(view.run("page='trends';operationsAccountId='official';generationAccountId()"),'secondary');
+  assert.equal(view.run("page='library';accountFilter='all';generationAccountId()"),'secondary');
 });
 
 test('old standalone routes resolve inside their new workspaces',()=>{
   const view=ui(async()=>response(fixture()));
-  for(const [old,nested,root] of [['trends','library/trends','library'],['creators','library/creators','library'],['images','studio','studio'],['calendar','accounts/calendar','accounts']]){
+  for(const [old,nested,root] of [['trends','library/trends','library'],['creators','library/creators','library'],['images','studio','studio'],['calendar','calendar','calendar']]){
     view.context.destination=old;view.run('nav(destination)');assert.equal(view.context.location.hash,nested);assert.equal(view.run('workspaceRoot()'),root);
     view.context.destination=nested;view.run('nav(destination)');assert.equal(view.run('page'),old==='images'?'studio':old);
   }

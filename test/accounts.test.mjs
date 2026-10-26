@@ -62,17 +62,18 @@ async function fixture(t, { env = {}, fetcher, legacy } = {}) {
       base = `http://127.0.0.1:${app.server.address().port}`;
       await login();
     },
-    async request(url, data, method = 'POST') {
+    async request(url, data, method = 'POST', accountId) {
       const response = await fetch(base + '/api/' + url, {
         method,
-        headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' },
+        headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json', ...(accountId ? { 'X-RedPilot-Account': accountId } : {}) },
         ...(data !== undefined ? { body: JSON.stringify(data) } : {})
       });
       return { status: response.status, data: await response.json() };
     }
   };
 }
-const state = async f => (await f.request('state', undefined, 'GET')).data;
+const state = async (f, accountId) => ok(await f.request('state', undefined, 'GET', accountId));
+const workspace = (f, accountId) => f.store.run(accountId, s => structuredClone(s));
 function ok(result) {
   assert.equal(result.status, 200, JSON.stringify(result.data));
   return result.data;
@@ -80,23 +81,40 @@ function ok(result) {
 async function addAccount(f, extra = {}) {
   return ok(await f.request('accounts', { name: '测试小号', type: 'personal', ...extra }));
 }
+async function prepareAccount(f, accountId) {
+  const current = await state(f, accountId);
+  if (!current.product.name) {
+    ok(await f.request('product', {
+      name: 'SimHelper', brand: current.accounts.find(account => account.id === accountId).name,
+      stage: '开发内测', summary: '备用号码管理设备', facts: ['短信同步'],
+      conditions: ['SIM 需移入设备', '设备需 Wi-Fi，手机需互联网'], restrictions: [], sources: []
+    }, 'PUT', accountId));
+  }
+  if (!current.productAssets.some(asset => asset.kind === 'image')) {
+    ok(await f.request('product-assets/upload', {
+      name: 'account-product.png', kind: 'image',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ioAAAAASUVORK5CYII='
+    }, 'POST', accountId));
+  }
+}
 async function draftFor(f, accountId, title = '备用号使用需求') {
-  const generated = ok(await f.request('drafts', { accountId, method: 'template' }));
-  return ok(await f.request('drafts/' + generated.id, { ...generated, title }, 'PUT'));
+  await prepareAccount(f, accountId);
+  const generated = ok(await f.request('drafts', { accountId, method: 'template' }, 'POST', accountId));
+  return ok(await f.request('drafts/' + generated.id, { ...generated, title }, 'PUT', accountId));
 }
 async function schedule(f, draft) {
-  ok(await f.request(`drafts/${draft.id}/approve`, {}));
+  ok(await f.request(`drafts/${draft.id}/approve`, {}, 'POST', draft.accountId));
   return ok(await f.request(`drafts/${draft.id}/schedule`, {
     accountId: draft.accountId,
     scheduledAt: new Date(Date.now() + 3600000).toISOString()
-  }));
+  }, 'POST', draft.accountId));
 }
 async function makeDue(f) {
-  await f.store.mutate(s => {
+  for (const accountId of f.store.accountIds()) await f.store.run(accountId, () => f.store.mutate(s => {
     for (const job of s.jobs) {
       if (job.status === 'scheduled') job.scheduledAt = new Date(Date.now() - 60000).toISOString();
     }
-  });
+  }));
 }
 function verified(accountId) {
   return new Response(JSON.stringify({ status: 'published', verified: true, noteUrl, accountId }));
@@ -125,7 +143,7 @@ function legacyState() {
 test('initial official account and new personal account retain independent settings', async t => {
   const f = await fixture(t, { env: bridgeEnv });
   const initial = await state(f);
-  assert.equal(initial.schemaVersion, 3);
+  assert.equal(initial.schemaVersion, 4);
   assert.equal(initial.accounts.length, 1);
   const official = initial.accounts[0];
   assert.equal(initial.defaultAccountId, official.id);
@@ -142,6 +160,13 @@ test('initial official account and new personal account retain independent setti
   assert.equal(personal.settings.enabled, false);
   assert.equal(personal.bridgeAccountId, '');
   assert.equal(personal.lastDailyKey, null);
+  const personalState = await state(f, personal.id);
+  assert.equal(personalState.workspaceAccountId, personal.id);
+  assert.deepEqual(personalState.product.facts, []);
+  assert.deepEqual(personalState.product.sources, []);
+  assert.deepEqual(personalState.productAssets, []);
+  assert.deepEqual(personalState.drafts, []);
+  assert.equal('accountWorkspaces' in personalState, false);
   const updated = await state(f);
   assert.equal(updated.capabilities.accounts[personal.id].publisher, false);
   assert.equal(updated.defaultAccountId, official.id);
@@ -165,10 +190,13 @@ test('legacy migration preserves daily settings and submitted historical account
   assert.equal(official.lastDailyKey, '2026-10-24');
   assert.equal(historical.enabled, false);
   assert.notEqual(historical.id, official.id);
-  assert.equal(migrated.jobs[0].accountId, historical.id);
-  assert.equal(migrated.drafts.find(d => d.id === 'legacy-draft').accountId, historical.id);
+  const historicalState = await state(f, historical.id);
+  assert.equal(historicalState.jobs[0].accountId, historical.id);
+  assert.equal(historicalState.drafts.find(d => d.id === 'legacy-draft').accountId, historical.id);
+  assert.equal(migrated.jobs.length, 0);
+  assert.equal(migrated.drafts.some(d => d.id === 'legacy-draft'), false);
   assert.equal(migrated.drafts.find(d => d.id === 'legacy-unsubmitted').accountId, official.id);
-  const result = ok(await f.request('jobs/legacy-job/verify', {}));
+  const result = ok(await f.request('jobs/legacy-job/verify', {}, 'POST', historical.id));
   assert.equal(result.status, 'published');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].action, 'verify');
@@ -197,24 +225,25 @@ test('account editing validates fields and unique mappings, defaults cannot be a
   assert.equal((await f.request('accounts/missing/default', {})).status, 404);
 });
 
-test('draft account changes clear approval; a schedule cannot silently switch its target account', async t => {
+test('drafts cannot move between workspaces and schedules cannot silently switch targets', async t => {
   const f = await fixture(t);
   const official = (await state(f)).accounts[0];
   const personal = await addAccount(f);
   const draft = await draftFor(f, official.id);
-  ok(await f.request(`drafts/${draft.id}/approve`, {}));
-  const moved = ok(await f.request('drafts/' + draft.id, { ...draft, accountId: personal.id }, 'PUT'));
-  assert.equal(moved.accountId, personal.id);
-  assert.equal(moved.approved, false);
-  assert.equal((await f.request('drafts', { accountId: 'missing', method: 'template' })).status, 404);
-  ok(await f.request(`drafts/${draft.id}/approve`, {}));
+  ok(await f.request(`drafts/${draft.id}/approve`, {}, 'POST', official.id));
+  assert.equal((await f.request('drafts/' + draft.id, { ...draft, accountId: personal.id }, 'PUT', official.id)).status, 409);
+  assert.equal((await f.request('drafts/' + draft.id, { ...draft, accountId: personal.id }, 'PUT', personal.id)).status, 404);
+  assert.equal((await state(f, official.id)).drafts.find(d => d.id === draft.id).approved, true);
+  assert.equal((await state(f, personal.id)).drafts.length, 0);
+  assert.equal((await f.request('drafts', { accountId: 'missing', method: 'template' }, 'POST', official.id)).status, 404);
   assert.equal((await f.request(`drafts/${draft.id}/schedule`, {
-    accountId: official.id, scheduledAt: new Date(Date.now() + 3600000).toISOString()
-  })).status, 409);
-  assert.equal((await state(f)).jobs.length, 0);
-  const job = await schedule(f, moved);
-  assert.equal(job.accountId, personal.id);
-  assert.equal((await f.request('drafts/' + draft.id, { ...moved, accountId: official.id }, 'PUT')).status, 409);
+    accountId: personal.id, scheduledAt: new Date(Date.now() + 3600000).toISOString()
+  }, 'POST', official.id)).status, 409);
+  assert.equal((await state(f, official.id)).jobs.length, 0);
+  assert.equal((await state(f, personal.id)).jobs.length, 0);
+  const job = await schedule(f, draft);
+  assert.equal(job.accountId, official.id);
+  assert.equal((await f.request('drafts/' + draft.id, { ...draft, accountId: personal.id }, 'PUT', official.id)).status, 409);
 });
 
 test('two scheduled accounts dispatch to their own external IDs and keep per-account records', async t => {
@@ -234,13 +263,16 @@ test('two scheduled accounts dispatch to their own external IDs and keep per-acc
   await makeDue(f);
   await f.tick();
   assert.deepEqual(calls.map(c => c.accountId).sort(), ['official-external', 'personal-external']);
-  const published = await state(f);
-  assert.equal(published.jobs.filter(j => j.status === 'published').length, 2);
-  for (const job of published.jobs) {
-    assert.equal(published.drafts.find(d => d.id === job.draftId).accountId, job.accountId);
-    const expected = published.accounts.find(a => a.id === job.accountId);
-    assert.equal(job.account, expected.bridgeAccountId);
-    assert.equal(job.accountName, expected.name);
+  for (const account of [official, personal]) {
+    const published = await state(f, account.id);
+    assert.equal(published.jobs.filter(j => j.status === 'published').length, 1);
+    assert.ok(published.drafts.every(draft => draft.accountId === account.id));
+    for (const job of published.jobs) {
+      assert.equal(published.drafts.find(d => d.id === job.draftId).accountId, job.accountId);
+      assert.equal(job.accountId, account.id);
+      assert.equal(job.account, account.bridgeAccountId);
+      assert.equal(job.accountName, account.name);
+    }
   }
 });
 
@@ -251,7 +283,7 @@ test('an unmapped personal account cannot fall back to the legacy official envir
   const job = await schedule(f, await draftFor(f, personal.id));
   await makeDue(f);
   await f.tick();
-  const actual = (await state(f)).jobs.find(j => j.id === job.id);
+  const actual = (await state(f, personal.id)).jobs.find(j => j.id === job.id);
   assert.equal(actual.status, 'blocked');
   assert.equal(actual.attempts, 0);
   assert.equal(calls, 0);
@@ -270,7 +302,7 @@ test('pausing an account blocks its queued post without affecting another accoun
   ok(await f.request('accounts/' + personal.id, { enabled: false }, 'PUT'));
   await makeDue(f);
   await f.tick();
-  const s = await state(f);
+  const s = await state(f, personal.id);
   assert.equal(s.jobs.find(j => j.id === blocked.id).status, 'blocked');
   assert.equal(s.jobs.find(j => j.id === blocked.id).attempts, 0);
   assert.deepEqual(calls.map(c => c.accountId), ['official-external']);
@@ -293,14 +325,14 @@ test('submitted account bindings stay immutable and verification uses the origin
   assert.equal((await f.request('accounts/' + personal.id, { bridgeAccountId: 'another-external' }, 'PUT')).status, 409);
   await makeDue(f);
   await f.tick();
-  assert.equal((await state(f)).jobs[0].status, 'uncertain');
+  assert.equal((await state(f, personal.id)).jobs[0].status, 'uncertain');
   ok(await f.request('accounts/' + personal.id, { enabled: false }, 'PUT'));
   ok(await f.request(`accounts/${official.id}/default`, {}));
   env.REDPILOT_ACCOUNT_ID = 'changed-environment-id';
   assert.equal((await f.request('accounts/' + personal.id, { bridgeAccountId: 'another-external' }, 'PUT')).status, 409);
   assert.equal((await f.request(`accounts/${personal.id}/archive`, {})).status, 409);
-  assert.equal((await f.request(`jobs/${job.id}/retry`, {})).status, 409);
-  const checked = ok(await f.request(`jobs/${job.id}/verify`, {}));
+  assert.equal((await f.request(`jobs/${job.id}/retry`, {}, 'POST', job.accountId)).status, 409);
+  const checked = ok(await f.request(`jobs/${job.id}/verify`, {}, 'POST', job.accountId));
   assert.equal(checked.status, 'published');
   assert.deepEqual(calls.map(c => c.payload.action), ['publish', 'verify']);
   assert.deepEqual(calls.map(c => c.payload.accountId), ['personal-external', 'personal-external']);
@@ -317,7 +349,7 @@ test('a successful-looking receipt for another account stays uncertain', async t
   const actual = (await state(f)).jobs.find(j => j.id === job.id);
   assert.equal(actual.status, 'uncertain');
   assert.equal(actual.account, 'official-external');
-  assert.equal((await f.request(`jobs/${job.id}/retry`, {})).status, 409);
+  assert.equal((await f.request(`jobs/${job.id}/retry`, {}, 'POST', job.accountId)).status, 409);
 });
 
 test('account archiving retains history and refuses unresolved jobs', async t => {
@@ -326,9 +358,10 @@ test('account archiving retains history and refuses unresolved jobs', async t =>
   const draft = await draftFor(f, personal.id);
   const job = await schedule(f, draft);
   assert.equal((await f.request(`accounts/${personal.id}/archive`, {})).status, 409);
-  ok(await f.request(`jobs/${job.id}/cancel`, {}));
+  ok(await f.request(`jobs/${job.id}/cancel`, {}, 'POST', job.accountId));
   ok(await f.request(`accounts/${personal.id}/archive`, {}));
-  const s = await state(f);
+  const s = workspace(f, personal.id);
+  assert.equal((await f.request('state', undefined, 'GET', personal.id)).status, 404);
   assert.equal(s.accounts.find(a => a.id === personal.id).archived, true);
   assert.equal(s.drafts.find(d => d.id === draft.id).accountId, personal.id);
   assert.equal(s.jobs.find(j => j.id === job.id).status, 'cancelled');
@@ -349,6 +382,7 @@ test('daily generation has independent timezone keys and skips paused or archive
   });
   const official = (await state(f)).accounts[0];
   const chicago = await addAccount(f, { name: '芝加哥账号' });
+  await prepareAccount(f, chicago.id);
   const paused = await addAccount(f, { name: '暂停账号', enabled: false });
   const archived = await addAccount(f, { name: '归档账号' });
   for (const account of [official, chicago, paused, archived]) {
@@ -366,7 +400,12 @@ test('daily generation has independent timezone keys and skips paused or archive
   assert.equal(s.accounts.find(a => a.id === paused.id).lastDailyKey, null);
   assert.equal(s.accounts.find(a => a.id === archived.id).lastDailyKey, null);
   assert.equal(s.drafts.filter(d => d.method === 'ai' && d.accountId === official.id).length, 1);
-  assert.equal(s.drafts.filter(d => d.method === 'ai' && d.accountId === chicago.id).length, 1);
+  const chicagoState = await state(f, chicago.id);
+  assert.equal(chicagoState.drafts.filter(d => d.method === 'ai' && d.accountId === chicago.id).length, 1);
+  assert.equal(s.drafts.some(d => d.accountId === chicago.id), false);
+  assert.equal(chicagoState.drafts.some(d => d.accountId !== chicago.id), false);
+  assert.equal(chicagoState.jobs.length, 0);
+  assert.equal(chicagoState.lastDailyKey, '2026-10-24');
   assert.equal(s.jobs.length, 0);
   assert.equal(s.lastDailyKey, '2026-10-25');
 });
@@ -405,12 +444,12 @@ test('an unsubmitted blocked job can receive its first account mapping without c
   const job = await schedule(f, await draftFor(f, personal.id));
   await makeDue(f);
   await f.tick();
-  assert.equal((await state(f)).jobs.find(j => j.id === job.id).status, 'blocked');
+  assert.equal((await state(f, personal.id)).jobs.find(j => j.id === job.id).status, 'blocked');
   ok(await f.request(`accounts/${personal.id}`, { bridgeAccountId: 'new-personal-target' }, 'PUT'));
   const swap = await f.request(`accounts/${personal.id}`, { bridgeAccountId: 'another-target' }, 'PUT');
   assert.equal(swap.status, 409);
-  ok(await f.request(`jobs/${job.id}/retry`, {}));
+  ok(await f.request(`jobs/${job.id}/retry`, {}, 'POST', job.accountId));
   await f.tick();
   assert.deepEqual(calls, ['new-personal-target']);
-  assert.equal((await state(f)).jobs.find(j => j.id === job.id).status, 'published');
+  assert.equal((await state(f, personal.id)).jobs.find(j => j.id === job.id).status, 'published');
 });

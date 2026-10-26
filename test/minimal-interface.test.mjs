@@ -58,7 +58,7 @@ function ui(state=fixture()){
 }
 
 test('daily workspace has useful report controls but no report settings or unrelated blank-draft entry',()=>{
-  const view=ui();view.run("page='overview';operationsAccountId='secondary';reportDate='2026-10-26';render()");
+  const view=ui();view.run("page='overview';workspaceId='secondary';operationsAccountId='secondary';reportDate='2026-10-26';render()");
   const html=view.nodes['#app'].innerHTML;
   assert.match(html,/data-action="report-generate"/);assert.match(html,/id="report-date"/);assert.match(html,/09:00/);assert.match(html,/北京时间/);
   assert.doesNotMatch(html,/data-action="report-settings"|日报设置|data-action="generate"|新建草稿/);
@@ -67,13 +67,13 @@ test('daily workspace has useful report controls but no report settings or unrel
   view.run("page='studio'");assert.match(view.run('studio()'),/data-action="generate"/);
 });
 
-test('operations omit a redundant account selector until another active account exists',()=>{
+test('operations never duplicate the global workspace account switcher',()=>{
   const state=fixture();state.accounts=state.accounts.slice(0,1);const view=ui(state);
   assert.doesNotMatch(view.run('operationsAccountSelect()'),/<select\b/);
   view.run("S.accounts.push({id:'archived',name:'历史账号',archived:true,enabled:false})");
   assert.doesNotMatch(view.run('operationsAccountSelect()'),/<select\b/);
   view.context.second=fixture().accounts[1];view.run("S.accounts.push(second);operationsAccountId='secondary'");
-  const html=view.run('operationsAccountSelect()');assert.match(html,/<select[^>]+id="operations-account"/);assert.match(html,/<option value="secondary" selected>/);assert.doesNotMatch(html,/<option value="archived"/);
+  const html=view.run('operationsAccountSelect()');assert.equal(html,'');assert.match(view.run('accountMenuMarkup()'),/小号/);assert.doesNotMatch(view.run('accountMenuMarkup()'),/历史账号/);
 });
 
 test('report metrics keep three core cards and surface nonzero issue routes without verbose definitions',async()=>{
@@ -93,11 +93,13 @@ test('report metrics keep three core cards and surface nonzero issue routes with
 });
 
 test('account connection and daily automation controls have one home in account management',()=>{
-  const view=ui();view.run("page='settings'");const settings=view.run('settings()');
-  assert.doesNotMatch(settings,/publisher-settings-body|data-action="publisher-connect"/);assert.match(settings,/ai-connection-form/);
+  const view=ui();
+  assert.equal(view.run("knownPages.has('settings')"),false);
+  assert.equal(view.run("nestedPages.settings"),'overview');
+  assert.doesNotMatch(source,/function settings\(|ai-connection-form|data-page="settings"/);
   view.run("page='accounts'");const accounts=view.run('accounts()');
   for(const action of ['publisher-connect','daily']){
-    const controls=elements(accounts,'button').filter(button=>button['data-action']===action);assert.deepEqual(controls.map(button=>button['data-id']),['official','secondary']);
+    const controls=elements(accounts,'button').filter(button=>button['data-action']===action);assert.deepEqual(controls.map(button=>button['data-id']),['official']);
   }
   view.run("page='calendar'");const calendar=view.run('calendar()');
   assert.doesNotMatch(calendar,/data-action="daily"|data-ai-connector|data-publisher-connector|data-feishu-connector|每日任务设置/);
@@ -116,7 +118,7 @@ test('daily automation retains the clicked account without a second account pick
 });
 
 test('a report discovery still generates in the selected account with its saved source and instructions',async()=>{
-  const view=ui();view.run("page='overview';operationsAccountId='secondary';reportDate='2026-10-26'");
+  const view=ui();view.run("page='overview';workspaceId='secondary';operationsAccountId='secondary';reportDate='2026-10-26'");
   const html=view.run('reportDiscoveryMarkup(S.operationReports[0])'),button=elements(html,'button').find(item=>item['data-action']==='operation-create');
   assert.ok(button);assert.equal(button['data-kind'],'discovery');assert.equal(button['data-id'],'source-discovery');assert.equal(button['data-context'],'report-secondary');
   view.run('render=()=>{}');await view.run("createOperationDraft('discovery','source-discovery','report-secondary')");

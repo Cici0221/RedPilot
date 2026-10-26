@@ -153,18 +153,10 @@ test('autosave serializes requests and saves newer input after an older response
   assert.equal(maxActive,1);assert.equal(view.run('dirty'),false);assert.equal(view.run('edit.title'),'更新后的输入');assert.equal(view.run('edit.revision'),3);assert.equal(view.run('S.drafts[0].title'),'更新后的输入');assert.equal(view.nodes['#save-state'].textContent,'已自动保存');
 });
 
-test('moving a draft to another account keeps the edited draft visible before and after autosave',async()=>{
-  const state=fixture();state.drafts.push({...clone(state.drafts[0]),id:'other-official',title:'另一篇官方草稿'});
-  const gate=deferred();const view=ui({state,handle:async(request,{state})=>{
-    if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
-    await gate.promise;const result={...request.body,revision:state.drafts[0].revision+1};state.drafts[0]=result;return response(result);
-  }});beginEdit(view);view.run("accountFilter='official';render=()=>studio();edit.accountId='secondary';markDraftChanged()");
-  const pending=view.run('flushDraftSave()');await turn();view.run("edit.body='改属期间继续输入';markDraftChanged();changeDraftMode('text')");
-  assert.equal(view.run('draftCurrent().id'),'d1');assert.equal(view.run('selected'),'d1');assert.equal(view.run('edit.body'),'改属期间继续输入');
-  gate.resolve();await pending;
-  assert.equal(view.run('accountFilter'),'secondary');assert.equal(view.run('operationsAccountId'),'secondary');assert.equal(view.run('dirty'),false);assert.equal(view.run('draftCurrent().id'),'d1');
-  view.run("edit.body='改属保存后继续输入';markDraftChanged();changeDraftMode('image')");
-  assert.equal(view.run('selected'),'d1');assert.equal(view.run('edit.body'),'改属保存后继续输入');assert.equal(view.run('edit.accountId'),'secondary');assert.equal(view.run('dirty'),true);
+test('draft editing stays in the current workspace with no cross-account picker',()=>{
+  const state=fixture();state.drafts.push({...clone(state.drafts[0]),id:'secondary-draft',accountId:'secondary',title:'小号内容'});
+  const view=ui({state});beginEdit(view);view.run("workspaceId='official'");
+  const html=view.run('studio()');assert.doesNotMatch(html,/<select[^>]+(?:id="draft-account"|id="account-filter")/);assert.doesNotMatch(html,/小号内容/);assert.equal(view.run('generationAccountId()'),'official');
 });
 
 test('state requests started before a save cannot roll back its saved draft',async()=>{
