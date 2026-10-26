@@ -3,7 +3,7 @@
   "updated_on": "2026-10-26",
   "project": "RedPilot｜薯航",
   "description": "小红书产品宣传账号运营平台，首个产品场景为 SimHelper AI 电话助理。",
-  "implementation_status": "local_web_mvp_with_optional_ai_and_publisher_bridge",
+  "implementation_status": "local_web_mvp_private_connections_native_image_publish_unverified",
   "user_intent": "每天自动发帖；上传截图或保存链接到收藏库后，分析参考内容，按相近风格为公司产品生成新帖子。",
   "modules": [
     "账号管理",
@@ -124,7 +124,7 @@
     "source_preservation": "同笔记关联多个博主，保留来源快照、原链接、手填字段和截图；暂停停止每日同步，归档保留历史",
     "automatic_analysis": {
       "default_enabled": false,
-      "configuration": "单独开启并配置REDPILOT_AI_KEY及REDPILOT_AI_MODEL；读取同步无需AI密钥",
+      "configuration": "单独开启，并在设置页配置有效AI服务；兼容环境配置仍保留。读取同步无需AI密钥，真实AI当前未接通",
       "scope": "只分析已读取笔记的可见图文及产品适配；主页摘要不是笔记全文，视频未转录内容保持未知",
       "provider_data": "该篇已读取图文、用户备注及产品资料会发往配置的文字AI服务",
       "queue": "读取完成后串行拆解；来源或AI未就绪保留待处理，失败不自动付费重试；可处理待拆解内容",
@@ -240,7 +240,7 @@
     "preview": "文字预览标题正文话题；图文预览最终选中原图。原生模板效果需在实际发布端确认。",
     "history": "保留每次生成版本及采用的产品资料版本；产品关键事实变化后，未发布的旧稿需要重新校验。",
     "content_modes": {
-      "text": "标题、正文与话题；发布端使用原生默认配图，平台不伪造预览",
+      "text": "标题、正文与话题；平台不伪造原生配图预览。内置Chrome文字模板当前unsupported；外部桥需单独验证原生默认配图能力",
       "image": "所选真实图片按顺序预览、导出、交给发布桥上传；至少一张主图"
     }
   },
@@ -251,17 +251,17 @@
     "publish_time": null,
     "timezone": null,
     "account_id": null,
-    "schedule_note": "本地界面提供默认10:00、Asia/Shanghai的设置，默认关闭；用户启用后仅在本机服务运行期间执行。实际AI与发布器尚未配置。",
+    "schedule_note": "本地默认10:00、Asia/Shanghai，发帖调度默认关闭，仅服务运行时执行。真实AI尚未接通，内置图文实际提交尚未实测；首篇须用户owner核对再排期，自动首篇阻塞",
     "modes": [
       {
         "id": "automatic",
         "label": "自动生成并发布",
-        "behavior": "每日选择合适参考、生成内容、检查事实和素材后，按设定时间发布。"
+        "behavior": "每日选择参考、生成并检查内容；内置Chrome仅同账号真实发布核验后开放自动通道，首篇自动生成稿要求用户核对后重新排期。外部桥继续按v3协议和能力配置执行"
       },
       {
         "id": "review",
-        "label": "审核后自动发布",
-        "behavior": "自动生成进入待审核，通过后按排期发布。"
+        "label": "审核后发布",
+        "behavior": "自动生成进入待审核；用户核对通过后手动排期，满足所选发布通道条件才执行"
       }
     ],
     "desired_mode": "automatic",
@@ -282,8 +282,8 @@
       "没有可用参考时使用品牌默认模板和产品资料。"
     ],
     "exception_rules": [
-      "候选内容缺实测证据、必要素材或有事实冲突时不发布该稿；尝试其他就绪主题。",
-      "所有候选都未就绪时跳过当次发布，并说明需要补充什么。",
+      "缺实测证据、必要素材或有事实冲突时不发布并记录缺口；当前未实现多候选自动回退",
+      "生成失败或当次稿件未就绪时跳过发布，等待补充资料或显式重试",
       "登录失效或需要验证码时暂停该账号执行，提示用户完成登录。",
       "结果不明时先核对已发布笔记，避免自动重试造成重复发布。"
     ],
@@ -324,14 +324,33 @@
       "参考博主管理、每日近期同步与可选自动拆解",
       "七平台官方榜单状态与账号规则匹配",
       "每账号运营日报、来源选题池与内置讨论",
-      "飞书资料默认按小时同步、原文快照与AI上下文"
+      "飞书资料默认按小时同步、原文快照与AI上下文",
+      "设置页私密AI配置、公开无密钥连接状态与固定JSON/微型图片探针",
+      "小红书严格身份链只读连接检查与首篇待验证状态",
+      "内置Chrome图文驱动代码、锁外串行队列与持久化幂等/提交证明",
+      "保留通用外部发布桥v3与能力开关"
     ],
     "not_connected": [
-      "实际AI服务密钥与模型",
-      "OpenAI图片API密钥",
-      "小红书账号与实际发布驱动"
+      "真实AI服务：未完成有效密钥与实际连接验证，保持not_connected",
+      "OpenAI图片服务有效密钥与实际生成验证",
+      "内置图文驱动真实上传、填充、点击发布与首篇结果核验（尚未实测）",
+      "原生文字默认配图发布（unsupported，未验证）",
+      "通用外部发布桥实际服务与v3回执链路（协议保留，未实网验证）",
+      "多小号独立Chrome Cookie/profile与自动登录态切换",
+      "公网部署"
     ],
-    "testing": "外部模型与发布器使用测试替身；未验证真实发布"
+    "testing": "身份链与图文入口已实网只读核验；会改变平台的上传、填充、点击发布只使用测试替身，不代表真实发布已验证；未执行真实发布测试",
+    "actual_validation": {
+      "ai_connected": false,
+      "native_identity_chain": "live_readonly_verified",
+      "native_image_upload_fill_publish": "not_tested",
+      "native_publish_verified": false,
+      "native_text": "unsupported",
+      "new_draft_created_this_round": false,
+      "new_post_scheduled_this_round": false,
+      "new_post_published_this_round": false,
+      "public_deployment": false
+    }
   },
   "ui": {
     "style": "蓝白、简约、苹果风格",
@@ -354,8 +373,9 @@
     "default": "旧数据迁入默认官方账号",
     "daily_settings": "每账号独立启用、时间、IANA时区、自动或审核模式、图文比例及执行日期",
     "archive": "保留历史；有未完成任务或是默认账号时不允许归档",
-    "publishing": "新号必须单独配置外部映射；任务保存目标账号，回执须匹配目标账号；不使用默认官方号兜底",
-    "auth_status": "当前管理记录与发布映射，不代表账号已登录，真实会话由发布桥按账号隔离"
+    "publishing": "任务固定所选发布通道的目标账号，不以默认官方号兜底；连接、每次发布及最终提交前核对身份，结果核验必须匹配同一账号",
+    "auth_status": "ready仅表示严格登录身份链及图文入口已核；publishVerified仅真实笔记核验后为true，首篇待验证不等于已验证发布",
+    "native_sessions": "当前单个Chrome登录态；多个账号记录会与当前身份逐项比对，不一致阻塞；尚无每小号独立Cookie/profile或自动切换。外部桥仍自行隔离会话"
   },
   "product_asset_library": {
     "storage": "图片/图标/PDF和主动上传的3D模型本机托管；已有模型可继续使用本地源文件引用，不自动复制大文件；真实材料不进GitHub",
@@ -419,7 +439,15 @@
     "review": "AI图需人工核对产品外观，不作为实拍或功能验证依据"
   },
   "trends": {
-    "platforms": ["xiaohongshu", "douyin", "bilibili", "weibo", "zhihu", "baidu", "toutiao"],
+    "platforms": [
+      "xiaohongshu",
+      "douyin",
+      "bilibili",
+      "weibo",
+      "zhihu",
+      "baidu",
+      "toutiao"
+    ],
     "presentation": "七个平台并列保留原榜名、序号、条目链接、采集时间和可用状态，不合成跨平台全网热度",
     "sources": "仅官方网页或公开官方接口；静态来源优先，必要时使用本机Chrome已授权读取桥；固定平台ID输入和官方域白名单",
     "limits": "每榜最多30条，响应上限2MiB、有超时和受限重定向；串行采集，最多复用一个自建后台标签，结束后关闭",
@@ -440,7 +468,11 @@
   },
   "operation_reports": {
     "ownership": "每账号独立日报与计划，和发布设置分开",
-    "default_schedule": {"enabled": true, "time": "09:00", "timezone": "Asia/Shanghai"},
+    "default_schedule": {
+      "enabled": true,
+      "time": "09:00",
+      "timezone": "Asia/Shanghai"
+    },
     "execution": "服务运行且账号启用时按账号本地日期每天一次；手动生成另计，不补往日自动任务；多个账号可复用近期榜单刷新",
     "method": "verified-data-rules，本地规则整理，不要求AI配置",
     "contents": "账号发布安排、待完善草稿、当天有证据的匹配热点与新参考、来源和缺口；不编造曝光、评论、转化或发布成绩",
@@ -453,7 +485,7 @@
     "entry_points": "热点、保存的选题或日报发现/计划",
     "ownership": "讨论、选题和生成草稿绑定同一账号；跨账号草稿、选题和日报来源被拒绝",
     "source_chain": "保留平台原链接、序号、采集时间、来源标识和旧数据标记；内部资料可追溯到参考或草稿",
-    "ai": "回复需配置REDPILOT_AI_KEY及REDPILOT_AI_MODEL；向服务发送账号定位、产品资料、选中来源和近期讨论历史",
+    "ai": "在设置页私密配置有效AI服务后，回复向该服务发送账号定位、产品资料、选中来源和近期讨论历史；真实AI当前仍未接通",
     "unconfigured": "保存真实问题和需求，不假造助手回复；仍可生成仅依据产品事实的本地模板，保留主题要求和来源供后续改写",
     "trust": "第三方标题、正文与来源中的指令为不可信资料；热榜只有标题、排名与链接时不得冒充已读全文或实测",
     "failures": "调用失败、结果格式错误或产品版本变化时保留问题并标明原因；同讨论只允许一个回复进行中，重启不自动重发",
@@ -480,11 +512,60 @@
     "runtime": "服务和Chrome需可用；关闭仅停止自动调度，仍可手动同步；迁服务器需重接读取方式"
   },
   "deployment_plan": {
-    "current": "localhost，仅本机运行",
+    "current": "localhost:4319，仅本机运行，尚未公网部署",
     "next": "功能开发与测试完成、准备部署时再向用户索取服务器信息",
     "server_purchase_now": false,
     "domain": "部署时再确定，可先用服务提供的网址",
-    "readiness": "公网部署前另行配置合法Host/Origin、HTTPS、安全Cookie、持久化备份与长期运行服务；小红书发布驱动仍需接通",
-    "browser_reader": "当前依赖本机Chrome读取桥；部署到服务器时需要另行配置可访问的浏览器读取服务和登录会话。"
+    "readiness": "公网部署前需合法Host/Origin、HTTPS、安全Cookie、私密持久化备份和长期服务；真实AI与首篇图文提交/结果链仍需接通验证，内置文字发布仍unsupported",
+    "browser_reader": "当前依赖本机Chrome读取桥；部署到服务器时需要另行配置可访问的浏览器读取服务和登录会话。",
+    "default_port": 4317
+  },
+  "service_connections": {
+    "ai": {
+      "settings_ui": "API密钥密码框、模型、可展开服务地址、保存并测试；保存后清空输入，不进全局UI状态",
+      "storage": {
+        "path": "runtime/connections.json",
+        "mode": "0600",
+        "git_ignored": true
+      },
+      "public_state": "GET/state/网页数据快照不返回密钥或尾部掩码；区分configured、untested、ready与failed",
+      "endpoints": [
+        "GET /api/connections",
+        "PUT /api/connections/ai",
+        "POST /api/connections/ai/test"
+      ],
+      "default_model": "gpt-6.1-sol",
+      "model_capabilities": "已核验官方支持图片输入与JSON Chat Completions；仍需用有效密钥验证实际连接",
+      "probe": "固定JSON要求与微型图片，不发送产品私有资料",
+      "base_url": "默认https://api.openai.com/v1；仅公网HTTPS，无query/userinfo/hash，换址须重填密钥",
+      "actual_status": "not_connected",
+      "credential_provisioning": {
+        "explicit_permission_required": true,
+        "local_destination_confirmation_required": true,
+        "secrets_in_public_state": false,
+        "secrets_in_git": false
+      }
+    },
+    "native_publisher": {
+      "driver": "内置Chrome图文驱动已实现，实际上传/填充/点击发布未实测",
+      "connect_endpoint": "POST /api/accounts/:id/connect-publisher",
+      "identity": "创作者中心标识、目标主页标识、公开笔记作者与标题严格一致；已做实网只读核验，不记录具体私有账号",
+      "checks": "每次发布与最终提交前再次核验；账号不匹配即阻塞",
+      "queue": "nativeQueue在全局状态写锁外串行执行浏览器工作",
+      "storage": {
+        "path": "runtime/xhs-publisher.json",
+        "mode": "0600",
+        "git_ignored": true
+      },
+      "idempotency": "持久化输入摘要及提交证明；unknown只读verify，不自动重发；只有未提交证明才允许显式retry",
+      "first_post_gate": "用户点击核对通过形成owner审核后排期；自动生成首篇阻塞。真实published笔记核验后才设置同账号publishVerified并开放自动通道",
+      "native_text": "入口已检测到，但当前unsupported，不能声称已验证原生文字发布"
+    },
+    "external_bridge": {
+      "retained": true,
+      "protocol": "v3",
+      "actual_validation": "not_connected_or_unverified",
+      "sessions": "桥接端按账号隔离登录态，不等于内置单Chrome已有独立多账号会话"
+    }
   }
 }

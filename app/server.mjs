@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { createStore } from './store.mjs';
 import { createAuth } from './auth.mjs';
+import { createConnections } from './connections.mjs';
+import { createXhsPublisher } from './xhs-publisher.mjs';
 import { imageProviderStatus, validateImageRequest, generateImage } from './image-workbench.mjs';
 import { receiveModelUpload, saveModelUpload, cleanModelUpload } from './model-uploads.mjs';
 import { inspirationUrl, supportedPageUrl, readReferenceLink } from './link-reader.mjs';
@@ -43,13 +45,17 @@ function validateFile(f) {
   else throw new InputError('仅支持 PNG、JPEG 和 WebP 图片');
   return {name,buf,ext,hash:createHash('sha256').update(buf).digest('hex')};
 }
-export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,creatorReader,trendReader,feishuReader,authClock}={}) {
+export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,creatorReader,trendReader,feishuReader,xhsPublisher,authClock}={}) {
+  env={...env};
+  const connections=await createConnections(directory,env,fetcher);
   const auth=await createAuth({directory,clock:authClock,secureCookies:env.REDPILOT_COOKIE_SECURE==='true'});
   const store=await createStore(root,directory,{legacyBridgeAccountId:env.REDPILOT_ACCOUNT_ID || ''});
+  const nativePublisher=xhsPublisher||await createXhsPublisher({directory,env});
   const bridgeReady=()=>Boolean(env.REDPILOT_PUBLISH_URL&&env.REDPILOT_PUBLISH_TOKEN);
-  const capabilities=()=>({ai:aiReady(env),model:env.REDPILOT_AI_MODEL||null,publisher:bridgeReady(),textPublisher:bridgeReady()&&env.REDPILOT_PUBLISH_TEXT_ENABLED==='true',
+  const nativeReady=account=>account.publisherDriver==='chrome'&&account.publisherConnection?.status==='ready'&&Boolean(account.bridgeAccountId);
+  const capabilities=()=>({ai:aiReady(env),model:env.REDPILOT_AI_MODEL||null,publisher:bridgeReady()||store.state.accounts.some(nativeReady),textPublisher:bridgeReady()&&env.REDPILOT_PUBLISH_TEXT_ENABLED==='true',
     account:accountById(store.state).bridgeAccountId||null,
-    accounts:Object.fromEntries(store.state.accounts.map(account=>[account.id,{publisher:bridgeReady()&&Boolean(account.bridgeAccountId)}])),
+    accounts:Object.fromEntries(store.state.accounts.map(account=>[account.id,{publisher:account.publisherDriver==='chrome'?nativeReady(account):bridgeReady()&&Boolean(account.bridgeAccountId)}])),
     feishu:true,linkReader:true});
   // Persist a result-unknown state after restart; never automatically retry an interrupted write.
   await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];s.imageJobs ||= [];for(const j of s.imageJobs)if(['queued','generating'].includes(j.status)){j.status='failed';j.error='服务已重启，生成结果未知；未自动重试，请先核对图片服务记录';j.completedAt=now();}for(const d of s.drafts){d.contentMode ||= 'image';d.productAssetIds ||= [];if(d.contentMode==='text'){d.productAssetIds=[];d.slides=[];}}for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs){j.contentMode ||= s.drafts.find(d=>d.id===j.draftId)?.contentMode||'image';if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}}});
@@ -92,20 +98,25 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   }
   async function dispatch(s,j,verify=false) {
     const account=accountById(s,j.accountId,true);
+    const native=verify?j.publisherDriver==='chrome':account.publisherDriver==='chrome';
     if(!verify&&(!account.enabled||account.archived)){j.status='blocked';j.error='账号已暂停或归档；没有进行真实发布';return;}
-    if(!bridgeReady()||(!verify&&!account.bridgeAccountId)){
+    if(!verify&&native&&!nativeReady(account)){j.status='blocked';j.error='小红书连接已失效，请重新检查登录；没有进行真实发布';return;}
+    if((!native&&!bridgeReady())||(!verify&&!account.bridgeAccountId)){
       j.status=verify?'uncertain':'blocked';j.error='该账号的发布器或发布账号 ID 尚未配置；没有进行真实发布';return;
     }
     if(verify&&!j.account){j.status='uncertain';j.error='缺少首次提交时的账号标识，需要人工核对平台记录';return;}
     const d=requireItem(s.drafts,j.draftId);
     if(!verify){
-      if(d.contentMode==='text'&&env.REDPILOT_PUBLISH_TEXT_ENABLED!=='true'){j.status='blocked';j.error='发布端尚未确认支持文字稿原生默认配图；没有进行真实发布';return;}
+      if(d.contentMode==='text'&&(native||env.REDPILOT_PUBLISH_TEXT_ENABLED!=='true')){j.status='blocked';j.error='发布端尚未确认支持文字稿原生默认配图；没有进行真实发布';return;}
       const issues=checks(d,s.product,s.productAssets);
       if(issues.length||d.revision!==j.draftRevision||!d.approved||d.accountId!==j.accountId){j.status='blocked';j.error=issues.join('；')||'草稿版本变更或尚未审核';return;}
+      if(native&&!account.publisherConnection?.publishVerified&&d.approvalKind!=='owner'){j.status='blocked';j.error='首次发布请在创作台核对草稿后重新排期；没有进行真实发布';return;}
       j.status='publishing';j.attempts++;j.account=account.bridgeAccountId;
+      j.publisherDriver=native?'chrome':'bridge';
       // Write intent before the external side effect, even if the request later fails.
       await store.save();
     }
+    if(native){scheduleNativePublish(j.id,verify);return;}
     try {
       const sourceAssets=verify||d.contentMode==='text'?[]:await Promise.all(selectedProductAssets(s,d.productAssetIds||[]).map(async a=>({id:a.id,name:a.name,mime:a.mime,kind:a.kind,data:(await readFile(await readableAssetFile(a,directory))).toString('base64')})));
       const res=await fetcher(env.REDPILOT_PUBLISH_URL,{method:'POST',redirect:'error',signal:AbortSignal.timeout(60000),headers:{'Content-Type':'application/json',Authorization:`Bearer ${env.REDPILOT_PUBLISH_TOKEN}`,'Idempotency-Key':j.idempotencyKey},
@@ -114,13 +125,42 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       if(!res.ok)throw new Error('bridge_error');
       const result=await res.json();
       const parsed=result.noteUrl?new URL(result.noteUrl):null;
-      if(result.status==='published'&&result.verified===true&&result.accountId===j.account&&parsed?.protocol==='https:'&&['www.xiaohongshu.com','xiaohongshu.com'].includes(parsed.hostname)&&/^\/(explore|discovery\/item)\/[a-f\d]{24}(?:\/|$)/i.test(parsed.pathname)) {
+      if(result.status==='published'&&result.verified===true&&result.accountId===j.account&&parsed?.protocol==='https:'&&!parsed.username&&!parsed.password&&(!parsed.port||parsed.port==='443')&&['www.xiaohongshu.com','xiaohongshu.com'].includes(parsed.hostname)&&/^\/(explore|discovery\/item)\/[a-f\d]{24}(?:\/|$)/i.test(parsed.pathname)) {
         j.status='published';j.noteUrl=parsed.href;j.publishedAt=now();j.error=null;d.status='published';
       } else {j.status='uncertain';j.error='发布器未返回匹配账号且经过核对的笔记链接，请核对后处理';}
     } catch {j.status='uncertain';j.error='发布器请求未完成或返回异常；为防止重复发布，不会自动重发';}
     store.event(s,'publish',`[${j.accountName}] ${j.status==='published'?'已核对发布':'待核对'}：${j.title}`);
   }
-  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),creatorQueue=Promise.resolve(),analysisQueue=Promise.resolve(),trendQueue=Promise.resolve(),reportQueue=Promise.resolve(),feishuQueue=Promise.resolve(),closing=false;
+  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),creatorQueue=Promise.resolve(),analysisQueue=Promise.resolve(),trendQueue=Promise.resolve(),reportQueue=Promise.resolve(),feishuQueue=Promise.resolve(),nativeQueue=Promise.resolve(),closing=false;
+  const queuedNative=new Set();
+  function scheduleNativePublish(jobId,verify){
+    if(queuedNative.has(jobId))return;queuedNative.add(jobId);
+    nativeQueue=nativeQueue.then(async()=>{
+      if(closing)return;
+      try{
+        const snapshot=await store.mutate(s=>{const job=requireItem(s.jobs,jobId),draft=requireItem(s.drafts,job.draftId);job.verificationPending=verify;return {job:structuredClone(job),draft:structuredClone(draft),assets:verify?[]:structuredClone(selectedProductAssets(s,draft.productAssetIds||[]))};});
+        const request={idempotencyKey:snapshot.job.idempotencyKey,accountId:snapshot.job.account,retry:snapshot.job.nativeRetry===true};
+        let result;
+        if(verify)result=await nativePublisher.verify(request);
+        else{
+          const images=await Promise.all(snapshot.assets.filter(a=>a.kind==='image').map(async a=>({id:a.id,name:a.name,mime:a.mime,path:await readableAssetFile(a,directory)})));
+          result=await nativePublisher.publish({...request,post:{title:snapshot.draft.title,body:snapshot.draft.body,tags:snapshot.draft.tags,contentMode:snapshot.draft.contentMode,images}});
+        }
+        await store.mutate(s=>{
+          const job=requireItem(s.jobs,jobId),draft=requireItem(s.drafts,job.draftId);job.verificationPending=false;delete job.nativeRetry;
+          let note;try{note=new URL(result?.noteUrl);}catch{}
+          const authorPath=note?.pathname.match(/^\/user\/profile\/([a-f\d]{24})\/[a-f\d]{24}\/?$/i);
+          const validPath=note&&(/^\/(explore|discovery\/item)\/[a-f\d]{24}\/?$/i.test(note.pathname)||authorPath?.[1].toLowerCase()===job.account);
+          if(result?.status==='published'&&result.verified===true&&result.accountId===job.account&&note?.protocol==='https:'&&!note.username&&!note.password&&(!note.port||note.port==='443')&&['www.xiaohongshu.com','xiaohongshu.com'].includes(note.hostname)&&validPath){
+            job.status='published';job.noteUrl=note.href;job.publishedAt=now();job.error=null;draft.status='published';
+            const a=accountById(s,job.accountId,true);a.publisherConnection={...a.publisherConnection,publishVerified:true,lastPublishedAt:job.publishedAt};
+          }else if(result?.status==='blocked'&&result.submitted===false&&(!verify||result.verifiedNoSubmission===true)){job.status='blocked';job.attempts=0;job.error=typeof result.error==='string'?result.error.slice(0,500):'发布前检查未通过，没有提交笔记';}
+          else{job.status='uncertain';job.error=typeof result?.error==='string'?result.error.slice(0,500):'发布结果待核对，不会自动重发';}
+          store.event(s,'publish',`[${job.accountName}] ${job.status==='published'?'已核对发布':job.status==='blocked'?'发布前阻塞':'待核对'}：${job.title}`);
+        });
+      }catch{await store.mutate(s=>{const job=requireItem(s.jobs,jobId);job.status='uncertain';job.verificationPending=false;job.error='浏览器发布未完成，结果待核对；不会自动重发';});}
+    }).catch(error=>console.error('Native publisher failed:',error.name)).finally(()=>queuedNative.delete(jobId));
+  }
   const readFeishu=feishuReader||((request)=>readFeishuSources(request,env));
   const queuedFeishu=new Set();
   function pumpFeishu(){for(const job of store.state.feishuJobs.filter(j=>j.status==='queued'))scheduleFeishu(job.id);}
@@ -438,7 +478,8 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
     }).catch(error=>console.error('Render queue failed:',error.name));
   }
-  const publicState=()=>({...store.state,trendMatches:Object.fromEntries(store.state.accounts.map(a=>[a.id,rankedTrends(store.state,a)])),imageProvider:imageProviderStatus(env),productAssets:store.state.productAssets.map(a=>publicAsset(a,store.state)),
+  const connectionState=()=>({ai:connections.publicAI(),publisher:{configured:bridgeReady()||store.state.accounts.some(nativeReady),nativeAvailable:true,status:store.state.accounts.some(nativeReady)?'ready':bridgeReady()?'untested':'unconfigured'},accounts:Object.fromEntries(store.state.accounts.map(a=>[a.id,a.publisherConnection||{status:'unconfigured',checkedAt:null,error:null}]))});
+  const publicState=()=>({...store.state,connections:connectionState(),trendMatches:Object.fromEntries(store.state.accounts.map(a=>[a.id,rankedTrends(store.state,a)])),imageProvider:imageProviderStatus(env),productAssets:store.state.productAssets.map(a=>publicAsset(a,store.state)),
     capabilities:capabilities(),draftChecks:Object.fromEntries(store.state.drafts.map(d=>[d.id,checks(d,store.state.product,store.state.productAssets)]))});
   let ticking=false;
   async function tick(date=new Date()) {
@@ -503,6 +544,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
       if(pathname.startsWith('/api/')) {
         if(req.method==='GET'&&pathname==='/api/state')return json(res,publicState());
+        if(req.method==='GET'&&pathname==='/api/connections')return json(res,connectionState());
         if(req.method==='GET'&&pathname==='/api/health')return json(res,{ok:true});
         const media=pathname.match(/^\/api\/product-assets\/([^/]+)\/(file|preview)$/);
         if(media&&['GET','HEAD'].includes(req.method)) {
@@ -538,6 +580,27 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           } finally {if(upload)await cleanModelUpload(upload,directory,store.state,committed);}
         }
         const b=await body(req);
+        if(req.method==='PUT'&&pathname==='/api/connections/ai')return json(res,await connections.update(b));
+        if(req.method==='POST'&&pathname==='/api/connections/ai/test')return json(res,await connections.test());
+        const connectPublisherRoute=pathname.match(/^\/api\/accounts\/([^/]+)\/connect-publisher$/);
+        if(req.method==='POST'&&connectPublisherRoute){
+          const snapshot=accountById(store.state,connectPublisherRoute[1]),profileId=String(snapshot.profileUrl||'').match(/^https:\/\/(?:www\.)?xiaohongshu\.com\/user\/profile\/([a-f\d]{24})(?:[/?#]|$)/i)?.[1]?.toLowerCase();
+          if(!profileId)throw new InputError('请先填写这个账号的小红书主页链接');
+          const originalProfile=snapshot.profileUrl,originalMapping=snapshot.bridgeAccountId;
+          const result=await nativePublisher.checkConnection(profileId);
+          const status=['ready','needs_login','mismatch','unsupported','unavailable'].includes(result?.status)?result.status:'unavailable';
+          const value={status,accountId:typeof result?.accountId==='string'?result.accountId:null,handle:typeof result?.handle==='string'?result.handle.slice(0,100):null,checkedAt:now(),image:result?.image===true,text:false,error:typeof result?.error==='string'?result.error.slice(0,500):null,loginUrl:'https://creator.xiaohongshu.com/'};
+          if(status==='ready'&&value.accountId!==profileId)Object.assign(value,{status:'mismatch',error:'登录账号与所选账号主页不一致，未绑定发布目标'});
+          return json(res,await store.mutate(s=>{
+            const account=accountById(s,snapshot.id);if(account.profileUrl!==originalProfile||account.bridgeAccountId!==originalMapping)throw new InputError('账号资料已变化，请重新检查登录',409);
+            if(value.status==='ready'){
+              if(account.publisherDriver!=='chrome'&&s.jobs.some(j=>j.accountId===account.id&&['scheduled','blocked','publishing','uncertain'].includes(j.status)))throw new InputError('请先处理现有发布任务，再切换发布方式',409);
+              updateAccount(s,account.id,{bridgeAccountId:value.accountId});account.publisherDriver='chrome';
+            }
+            const publishVerified=account.publisherConnection?.accountId===value.accountId&&account.publisherConnection?.publishVerified===true;
+            account.publisherConnection={...value,publishVerified};return account.publisherConnection;
+          }));
+        }
         const messageRoute=pathname.match(/^\/api\/discussions\/([^/]+)\/messages$/);
         if(req.method==='POST'&&messageRoute){
           const content=str(b.content,4000,true);
@@ -669,13 +732,13 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
             if(s.jobs.some(j=>j.draftId===d.id&&!['cancelled','failed'].includes(j.status)))throw new InputError('请先取消排期；已发布或待核对的稿件可复制为新草稿',409);
             if(req.method==='DELETE'){s.drafts=s.drafts.filter(x=>x.id!==d.id);return {ok:true};}
             if(req.method==='PUT'){const account=accountById(s,b.accountId||d.accountId),validated=validateDraft({...b,contentMode:b.contentMode??d.contentMode});const data={...validated,productAssetIds:validated.contentMode==='text'?[]:selectedProductAssets(s,b.productAssetIds??d.productAssetIds??[]).map(a=>a.id),accountId:account.id};d.history.unshift({at:d.updatedAt,title:d.title,body:d.body,slides:d.slides,tags:d.tags,contentMode:d.contentMode,productAssetIds:d.productAssetIds});d.history=d.history.slice(0,20);Object.assign(d,data,{productVersion:s.product.version,approved:false,revision:d.revision+1,updatedAt:now()});return d;}
-            if(m[2]==='approve'&&req.method==='POST'){const issues=checks(d,s.product,s.productAssets);if(issues.length)throw new InputError(issues.join('；'),409);d.approved=true;return d;}
+            if(m[2]==='approve'&&req.method==='POST'){const issues=checks(d,s.product,s.productAssets);if(issues.length)throw new InputError(issues.join('；'),409);d.approved=true;d.approvalKind='owner';return d;}
             if(m[2]==='schedule'&&req.method==='POST'){const at=new Date(b.scheduledAt);if(!Number.isFinite(at.valueOf())||at<=new Date())throw new InputError('请选择未来的发布时间');return newJob(s,d,at.toISOString(),b.accountId||d.accountId);}
           }
           m=pathname.match(/^\/api\/jobs\/([^/]+)\/(cancel|retry|verify)$/);
           if(m&&req.method==='POST'){const j=requireItem(s.jobs,m[1]);
             if(m[2]==='cancel'){if(['publishing','uncertain','published'].includes(j.status))throw new InputError('当前任务需要先核对发布结果，不能直接取消',409);j.status='cancelled';const d=requireItem(s.drafts,j.draftId);d.status='draft';return j;}
-            if(m[2]==='retry'){if(j.status!=='blocked'||j.attempts>0)throw new InputError('只有从未提交的阻塞任务才能重新入队',409);j.status='scheduled';j.error=null;return j;}
+            if(m[2]==='retry'){if(j.status!=='blocked'||j.attempts>0)throw new InputError('只有从未提交的阻塞任务才能重新入队',409);j.status='scheduled';j.error=null;if(j.publisherDriver==='chrome')j.nativeRetry=true;return j;}
             if(m[2]==='verify'){if(j.status!=='uncertain')throw new InputError('只有待核对任务可查询发布结果',409);await dispatch(s,j,true);return j;}
           }
           throw new InputError('接口不存在',404);
@@ -696,7 +759,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await store.close();}};
+  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue,nativeQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await connections.close();await nativePublisher.close?.();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);

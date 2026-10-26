@@ -418,3 +418,35 @@ body{letter-spacing:-.15px}.layout{grid-template-columns:236px 1fr}.sidebar{widt
 .feishu-snapshot-text{font-family:var(--font);font-size:12px;font-weight:400;line-height:2;color:#7a8da7;border-top:1px solid #edf1f7;margin:20px 0 0;padding-top:20px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:58vh;overflow:auto;scrollbar-width:thin;scrollbar-color:#dce5f2 transparent}
 @media(max-width:1100px){.feishu-layout{grid-template-columns:1fr;gap:25px}.feishu-document{padding:18px}.feishu-sync-times{grid-template-columns:repeat(3,minmax(0,1fr))}.feishu-sync-times>div:nth-child(3){grid-column:auto}}
 @media(max-width:760px){.feishu-settings-panel{padding:19px}.feishu-setting-top{gap:12px}.feishu-setting-top>.check-label{font-size:11px}.feishu-setting-top>select{min-width:115px;font-size:10px}#feishu-source-urls{font-size:16px}.feishu-sync-times{grid-template-columns:1fr 1fr}.feishu-sync-times>div:nth-child(3){grid-column:1/-1}.feishu-document{padding:16px;display:block}.feishu-document-main h3{font-size:12px}.feishu-document-actions{justify-content:flex-start;margin-top:12px;gap:17px}.feishu-document-meta>time{font-size:8px}.feishu-snapshot-text{font-size:12px;max-height:55vh}}
+
+/* Private service configuration and verified account connections. */
+#ai-connection-form fieldset{border:0;padding:0;margin:0;min-width:0}
+#ai-connection-form fieldset:disabled{opacity:.7}
+#ai-api-key{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;letter-spacing:.3px}
+#ai-connection-form .field small{font-size:9px;color:#a5b2c5}
+#ai-connection-form .actions{margin-top:7px}
+#ai-connection-form .actions>.btn{font-size:11px;padding:10px 14px}
+.connection-advanced{border-top:1px solid #eef2f7;margin-top:4px;margin-bottom:21px}
+.connection-advanced>summary{font-size:10px;color:#98abc5;cursor:pointer;padding:15px 0}
+.connection-advanced>.field{margin:4px 0 10px}
+.connection-advanced input{font-size:11px}
+.ai-connection-status{border-top:1px solid #eaf0f7;margin-top:20px;padding-top:16px}
+.ai-connection-status-top,.publisher-status-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.ai-connection-status-top>time,.ai-connection-status-top>span:not(.badge),.publisher-status-top>time{font-size:9px;color:#a5b3c7;line-height:1.8}
+.ai-connection-status-top>.connection-source-label{margin-left:auto;color:#acb9cb;font-size:8px}
+.connection-error{font-size:10px;color:#b18b5c;line-height:1.9;margin-top:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.connection-test-note{font-size:9px;color:#a4b3c7;line-height:1.9;margin-top:14px}
+.publisher-settings-panel select{font-size:11px;background:#fff}
+.publisher-settings-status{margin-top:20px;margin-bottom:20px}
+.publisher-settings-panel .actions>.btn{font-size:11px;padding:9px 13px}
+.publisher-login-note{font-size:10px;color:#9baec7;line-height:1.9;margin-top:12px}
+.publisher-login-note>a{color:#7f9fc9;text-decoration:none;margin-left:6px}
+.publisher-login-note>a:hover{color:#007aff}
+.account-publisher-status{margin-top:15px}
+.account-publisher-status .badge{font-size:9px}
+.account-publisher-status .connection-error{font-size:10px;margin-top:8px}
+.account-publisher-status .publisher-login-note{margin-top:8px}
+@media(max-width:760px){.connection-advanced input,#ai-api-key,#ai-model{font-size:16px}.ai-connection-status-top>.connection-source-label{margin-left:0}.account-publisher-status .connection-error{font-size:9px}.publisher-login-note{font-size:9px}}
+.publisher-connector-badges{display:flex;align-items:flex-end;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+.publisher-mode-status{display:flex;gap:18px;flex-wrap:wrap;margin-top:16px;font-size:10px;color:#96a9c3;line-height:1.8}
+.publisher-mode-status small{font-size:9px;color:#aebace;margin-left:5px}
