@@ -7,11 +7,17 @@ export function aiReady(env) { return Boolean(env.REDPILOT_AI_KEY && env.REDPILO
 export async function callAI(env, prompt, imageContents = [], fetcher = fetch) {
   if (!aiReady(env)) throw new InputError('尚未配置 AI 模型。请在本地 .env 中填写模型、服务地址和密钥，然后重启服务。',409);
   const {url,options}=createAIRequest({baseUrl:env.REDPILOT_AI_BASE_URL||'https://api.openai.com/v1',key:env.REDPILOT_AI_KEY,model:env.REDPILOT_AI_MODEL,wireApi:env.REDPILOT_AI_WIRE_API||'chat',system:SYSTEM,prompt,images:imageContents});
-  const res=await fetcher(url,options);
-  if(!res.ok){await res.body?.cancel().catch(()=>{});throw new InputError(`AI 服务返回 ${res.status}，请检查模型、额度或配置；未保存分析结果。`,502);}
-  const value=await readAIResponse(res,{wireApi:env.REDPILOT_AI_WIRE_API||'chat'});
-  if(JSON.stringify(value).includes(env.REDPILOT_AI_KEY))throw new InputError('模型输出包含敏感凭据，未保存结果',502);
-  return value;
+  try{
+    const res=await fetcher(url,options);
+    if(!res.ok){await res.body?.cancel().catch(()=>{});throw new InputError(`AI 服务返回 ${res.status}，请检查模型、额度或配置；未保存分析结果。`,502);}
+    const value=await readAIResponse(res,{wireApi:env.REDPILOT_AI_WIRE_API||'chat'});
+    if(JSON.stringify(value).includes(env.REDPILOT_AI_KEY))throw new InputError('模型输出包含敏感凭据，未保存结果',502);
+    return value;
+  }catch(error){
+    if(options.signal.aborted||error?.status===504||['TimeoutError','AbortError'].includes(error?.name))throw new InputError('AI 生成超过 90 秒仍未完成，请稍后重试或检查服务状态',504);
+    if(error instanceof InputError)throw error;
+    throw new InputError('AI 服务连接未完成，请检查网络和服务地址后重试',502);
+  }
 }
 export async function imagesFor(reference, root, directory) {
   return Promise.all(reference.assets.map(async url=> {

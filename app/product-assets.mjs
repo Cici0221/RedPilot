@@ -117,6 +117,12 @@ export async function importProductAssets(state, directory, paths, mode='managed
 export async function uploadProductAsset(state,directory,input) {
   const name=str(input.name,180,true),ext=path.extname(name).toLowerCase();
   if(!['icon','image','brochure'].includes(input.kind)||TYPES[ext]?.[0]!==input.kind)throw new InputError('素材分类与文件格式不一致');
+  let source;
+  if(input.sourceAssetId!==undefined){
+    if(input.kind!=='image'||typeof input.sourceAssetId!=='string')throw new InputError('调整来源必须是已有图片');
+    source=state.productAssets.find(a=>a.id===input.sourceAssetId&&a.kind==='image');
+    if(!source)throw new InputError('调整来源图片不存在，请重新选择');
+  }
   const data=str(input.data,29*1024*1024,true);
   if(!/^[A-Za-z0-9+/]+={0,2}$/.test(data))throw new InputError('素材编码不正确');
   const bytes=Buffer.from(data,'base64');
@@ -127,6 +133,13 @@ export async function uploadProductAsset(state,directory,input) {
   try {
     const [asset]=await importProductAssets(state,directory,[file],'managed',[name]);
     asset.originalName=name;asset.sourceLabel='上传素材/'+name;
+    if(source){
+      asset.metadata ||= {};
+      if(source.id!==asset.id)asset.metadata.adjustedFromAssetId=source.id;
+      if(source.metadata?.testOnly===true)asset.metadata.testOnly=true;
+      if(source.metadata?.aiGenerated===true)asset.metadata.aiGenerated=true;
+      asset.description=source.metadata?.testOnly===true?'接口测试素材的手动调整，不是产品图片':'根据已有图片手动调整；不代表新增实拍或功能验证';
+    }
     return asset;
   } finally { await unlink(file).catch(()=>{}); }
 }

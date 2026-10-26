@@ -54,8 +54,16 @@ export function checks(d, product, assets = []) {
   if (d.contentMode !== 'text' && !d.productAssetIds?.some(key => assets.some(a => a.id === key && a.kind === 'image'))) problems.push('请至少选择一张真实产品图作为主图');
   if (d.gaps?.length) problems.push(...d.gaps);
   const text = `${d.title}\n${d.body}\n${d.slides?.map(s=>s.headline+' '+s.body).join('\n')}`;
-  const promises = /零延迟|永不漏接|全运营商|全机型|零漫游|双卡同时在线|正式发售|已售\d|100%/;
-  if (promises.test(text)) problems.push('包含需要额外依据的宣传承诺，请核对或改写');
+  const promises = /零延迟|永不漏接|全运营商|全机型|零漫游|双卡同时在线|正式发售|已售\d+|100%/g;
+  const claims = [...text.matchAll(promises)].filter(match => {
+    const prefix = text.slice(0, match.index).split(/[。！？；;，,\n]/).at(-1);
+    // Only explicit, immediately preceding denials are exempt. Questions,
+    // double negatives and a later positive repetition still require review.
+    const denial = prefix.match(/(?:并非|并不是|不是|尚未|暂未|还未|未曾|未|不代表|不等于|不承诺|不能承诺|不保证|无法保证|不支持|不能宣称|不宣称)\s*[“「『"]?\s*$/);
+    if (!denial) return true;
+    return /(?:并非|并不是|不是|不代表|不等于|不承诺|不能承诺|不保证|无法保证|不支持|不能宣称|不宣称|不|未)\s*$/.test(prefix.slice(0, denial.index));
+  }).map(match => match[0]);
+  if (claims.length) problems.push('请核对宣传表述的依据：'+[...new Set(claims)].join('、'));
   if (!text.includes(product.stage) && !text.includes('内测')) problems.push('请补充当前产品阶段说明');
   return [...new Set(problems)];
 }

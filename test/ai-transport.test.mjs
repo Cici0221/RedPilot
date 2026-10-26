@@ -16,6 +16,20 @@ function streamResponse(text,{chunkSize=7,headers={}}={}){
 }
 const safeFailure=error=>{assert.equal(error.status,502);assert.doesNotMatch(error.message,new RegExp(KEY));assert.doesNotMatch(error.message,/PRIVATE_PROVIDER_MESSAGE/);return true;};
 
+test('timeouts before headers and during response streaming remain explicit without leaking provider errors',async()=>{
+  const env={REDPILOT_AI_KEY:KEY,REDPILOT_AI_MODEL:'fixture-model',REDPILOT_AI_BASE_URL:'https://provider.example/v1',REDPILOT_AI_WIRE_API:'responses'};
+  const timedOut=error=>{assert.equal(error.status,504);assert.match(error.message,/90 秒/);assert.doesNotMatch(error.message,new RegExp(KEY+'|PRIVATE_PROVIDER_MESSAGE'));return true;};
+  for(const name of ['TimeoutError','AbortError']){
+    await assert.rejects(callAI(env,'fixture',[],async()=>{throw Object.assign(new Error('PRIVATE_PROVIDER_MESSAGE '+KEY),{name});}),timedOut);
+    await assert.rejects(callAI(env,'fixture',[],async()=>new Response(new ReadableStream({start(controller){controller.error(Object.assign(new Error('PRIVATE_PROVIDER_MESSAGE '+KEY),{name}));}}),{headers:{'Content-Type':'text/event-stream'}})),timedOut);
+  }
+});
+
+test('connection failure is distinct from malformed model JSON and does not expose raw network details',async()=>{
+  const env={REDPILOT_AI_KEY:KEY,REDPILOT_AI_MODEL:'fixture-model',REDPILOT_AI_BASE_URL:'https://provider.example/v1'};
+  await assert.rejects(callAI(env,'fixture',[],async()=>{throw new TypeError('PRIVATE_PROVIDER_MESSAGE '+KEY);}),error=>{assert.match(error.message,/连接未完成/);return safeFailure(error);});
+});
+
 test('wire protocol defaults only when absent and rejects invalid values',()=>{
   assert.equal(normalizeWireApi(), 'chat');
   assert.equal(normalizeWireApi(' chat '),'chat');

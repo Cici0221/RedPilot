@@ -182,6 +182,26 @@ test('a mixed managed/model batch and bad file signatures are rejected before im
   assert.equal((await state(f)).productAssets.length, 0);
 });
 
+test('adjusted images retain test provenance and reject missing or non-image sources', async t => {
+  const f = await fixture(t);
+  const source = await uploaded(f, 'test-source.png', 'image', PNG);
+  await f.store.mutate(s => { const item=s.productAssets.find(a=>a.id===source.id);item.metadata.testOnly=true;item.metadata.aiGenerated=true; });
+  const first = ok(await f.request('product-assets/upload', { name:'adjusted.png',kind:'image',sourceAssetId:source.id,data:Buffer.concat([PNG,Buffer.from('first-adjustment')]).toString('base64'),metadata:{testOnly:false} }));
+  assert.equal(first.metadata.testOnly,true);
+  assert.equal(first.metadata.aiGenerated,true);
+  assert.equal(first.metadata.adjustedFromAssetId,source.id);
+  assert.match(first.description,/不是产品图片/);
+  const next = ok(await f.request('product-assets/upload', { name:'adjusted-again.png',kind:'image',sourceAssetId:first.id,data:Buffer.concat([PNG,Buffer.from('second-adjustment')]).toString('base64') }));
+  assert.equal(next.metadata.testOnly,true);
+  assert.equal(next.metadata.adjustedFromAssetId,first.id);
+  const count=(await state(f)).productAssets.length;
+  assert.equal((await f.request('product-assets/upload', { name:'missing.png',kind:'image',sourceAssetId:'missing',data:PNG.toString('base64') })).status,400);
+  assert.equal((await f.request('product-assets/upload', { name:'not-image.svg',kind:'icon',sourceAssetId:source.id,data:svg().toString('base64') })).status,400);
+  assert.equal((await state(f)).productAssets.length,count);
+  await f.reopen();
+  assert.equal((await state(f)).productAssets.find(a=>a.id===next.id).metadata.testOnly,true);
+});
+
 test('uploads enforce kind, signatures, SVG inertness and the size limit', async t => {
   const f = await fixture(t);
   await uploaded(f, 'photo.png', 'image', PNG);

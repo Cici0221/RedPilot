@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {id,now,InputError,str,sourceUrl,dateParts,dailyKey,validateSettings} from './content.mjs';
+import {id,now,InputError,str,sourceUrl,dateParts,dailyKey,validateSettings,checks} from './content.mjs';
 import {TREND_PLATFORMS,isOfficialTrendUrl,safeTrendFailure} from './trend-sources.mjs';
 
 export const editorialActive=job=>['queued','running'].includes(job.status);
@@ -120,35 +120,103 @@ export function addTopic(state,account,input) {
   if(topic){topic.sources=[...new Map([...topic.sources,...sources].map(s=>[(s.platformId||'')+'|'+s.url,s])).values()].slice(0,20);topic.sourceIds=[...new Set([...(topic.sourceIds||[]),...sourceIds])].slice(0,30);topic.updatedAt=now();return topic;}
   topic={id:id(),accountId:account.id,title,sources,sourceIds:[...new Set(sourceIds)],status:'saved',createdAt:now(),updatedAt:now()};state.topicPool.unshift(topic);return topic;
 }
-export function queueReport(state,account,date,reason='manual') {
+export function queueReport(state,account,date,reason='manual',requestedAt=now()) {
   const day=reportDate(date,account.reportSettings.timezone);
   let job=state.reportJobs.find(j=>j.accountId===account.id&&j.date===day&&editorialActive(j));if(job)return job;
-  job={id:id(),accountId:account.id,date:day,status:'queued',reason,createdAt:now()};state.reportJobs.unshift(job);return job;
+  job={id:id(),accountId:account.id,date:day,timezone:account.reportSettings.timezone,status:'queued',phase:'queued',reason,requestedAt:validTime(requestedAt)?requestedAt:now(),createdAt:now()};state.reportJobs.unshift(job);return job;
 }
 function internalSource(kind,record){return {title:(kind==='draft'?'草稿：':'参考：')+record.title,url:'#'+kind+'/'+record.id,kind,id:record.id};}
-export function buildReport(state,account,day) {
-  const timezone=account.reportSettings.timezone,plans=[],discoveries=[],issues=[];
+export function buildReport(state,account,day,{asOf=now()}={}) {
+  const timezone=account.reportSettings.timezone,capturedAt=validTime(asOf)?new Date(asOf).toISOString():now(),cutoff=Date.parse(capturedAt),today=dailyKey(new Date(capturedAt),timezone),plans=[],discoveries=[],issues=[];
   const prior=state.operationReports.find(r=>r.accountId===account.id&&r.date===day);
-  // A current board cannot reconstruct a previous day's observations. Retain
-  // the already saved evidence instead of erasing it during a historic refresh.
-  if(prior&&day<dailyKey(new Date(),timezone))return structuredClone(prior);
+  if(prior&&day<today)return structuredClone(prior);
+  const mode=day<today?'historical':day>today?'future':'live';
+  const snapshot={date:day,timezone,asOf:capturedAt,generatedAt:capturedAt,mode,draftCount:0,jobCount:0,referenceCount:0,sourceCount:0,readableBoardCount:0,boardCount:TREND_PLATFORMS.length,productVersion:state.product.version};
+  if(mode!=='live')return {id:prior?.id||id(),accountId:account.id,date:day,timezone,status:'partial',plans:prior?.plans?.filter(p=>p.done).map(p=>structuredClone(p))||[],discoveries:[],metrics:[],issues:[mode==='historical'?'未保存该日期的日报快照，无法用当前状态还原当日运营数据':'该日期尚未到来，未生成未来的运营事实'],accountDirection:account.notes||'',method:'verified-data-rules',generatedAt:capturedAt,productVersion:state.product.version,snapshot};
+  const before=value=>!validTime(value)||Date.parse(value)<=cutoff;
+  const visible=record=>before(record.createdAt)&&before(record.updatedAt);
+  const sameDay=value=>validTime(value)&&dailyKey(new Date(value),timezone)===day;
+  const onDay=value=>sameDay(value)&&Date.parse(value)<=cutoff;
+  const drafts=state.drafts.filter(d=>d.accountId===account.id&&visible(d));
+  const jobs=state.jobs.filter(j=>j.accountId===account.id&&visible(j));
+  const scheduled=jobs.filter(j=>j.status!=='cancelled'&&sameDay(j.scheduledAt));
+  const published=jobs.filter(j=>j.status==='published'&&onDay(j.publishedAt)&&isOfficialTrendUrl('xiaohongshu',j.noteUrl));
+  const pending=drafts.filter(d=>d.status==='draft'&&!d.approved);
+  const publishingIssues=jobs.filter(j=>['blocked','failed','uncertain'].includes(j.status));
+  const generations=(state.draftGenerationJobs||[]).filter(j=>j.accountId===account.id&&visible(j));
+  const latestGenerations=new Map();for(const job of [...generations].sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))))if(!latestGenerations.has(job.requestFingerprint||job.id))latestGenerations.set(job.requestFingerprint||job.id,job);
+  const generationIssues=[...latestGenerations.values()].filter(j=>j.status==='failed');
+  const ownedReferences=new Set(drafts.flatMap(d=>d.referenceIds||[]));
+  for(const record of [...(state.topicPool||[]),...(state.discussions||[])].filter(r=>r.accountId===account.id&&visible(r)))for(const source of record.sources||[])if(source.kind==='reference'&&source.id)ownedReferences.add(source.id);
+  const direction=[account.name,account.notes||'',state.product.name,state.product.summary,...state.product.facts].join(' '),keywords=words(direction);
+  const relatedReference=reference=>{
+    if(reference.accountId&&reference.accountId!==account.id)return false;
+    if(Array.isArray(reference.accountIds)&&reference.accountIds.length&&!reference.accountIds.includes(account.id))return false;
+    if(reference.accountId===account.id||reference.accountIds?.includes(account.id)||ownedReferences.has(reference.id))return true;
+    const text=[reference.title,...(reference.tags||[]),reference.analysis?.topic||'',reference.text?.slice(0,500)||''].join(' ');
+    return keywords.some(word=>contains(text,word))||GROUPS.some(([,terms])=>terms.some(term=>contains(direction,term))&&terms.some(term=>contains(text,term)));
+  };
+  const references=state.inspirations.filter(r=>visible(r)&&before(r.pageContent?.readAt)&&relatedReference(r));
+  const newReferences=references.filter(r=>onDay(r.createdAt));
+  const readableBoards=state.trendBoards.filter(b=>!b.stale&&['ready','partial'].includes(b.status)&&b.items?.length&&onDay(b.fetchedAt));
+  const metrics=[
+    {key:'scheduled_today',label:'今日排期',value:scheduled.length,unit:'篇',detail:'本账号当天的本地发布任务，含待处理与已完成',route:'#queue'},
+    {key:'published_today',label:'今日已发布',value:published.length,unit:'篇',detail:'以当天已核验的官方笔记发布记录为准',route:'#queue'},
+    {key:'pending_review',label:'待核对草稿',value:pending.length,unit:'篇',detail:'本账号当前未核对的草稿',route:'#write'},
+    {key:'publishing_issues',label:'发布待处理',value:publishingIssues.length,unit:'项',detail:'阻塞、失败或提交结果待核对的任务',route:'#queue'},
+    {key:'generation_issues',label:'生成待处理',value:generationIssues.length,unit:'项',detail:'按相同生成请求的最新一次任务统计，已重试成功的不再计入',route:'#write'},
+    {key:'new_references',label:'关联新收藏',value:newReferences.length,unit:'条',detail:'当天入库且已引用或与账号方向、产品资料相关的收藏',route:'#library'}
+  ];
   const oldDone=new Map((prior?.plans||[]).map(p=>[p.key,p.done]));
-  const plan=(key,title,detail,sources,extra={})=>plans.push({id:prior?.plans.find(p=>p.key===key)?.id||id(),key,title,detail,sources,done:oldDone.get(key)||false,...extra});
-  for(const job of state.jobs.filter(j=>j.accountId===account.id&&!['cancelled','published'].includes(j.status)&&dailyKey(new Date(j.scheduledAt),timezone)===day).slice(0,3)){
-    const draft=state.drafts.find(d=>d.id===job.draftId);if(draft)plan('job:'+job.id,'核对发布安排：'+job.title,'计划时间 '+dateParts(new Date(job.scheduledAt),timezone).hour+':'+dateParts(new Date(job.scheduledAt),timezone).minute+'；当前状态 '+job.status,[internalSource('draft',draft)],{draftId:draft.id});
+  const plan=(key,title,detail,sources,extra={})=>plans.push({id:prior?.plans.find(p=>p.key===key)?.id||id(),key,title,detail,sources,done:oldDone.get(key)||false,kind:'review',priority:'normal',blockers:[],...extra});
+  const action=(type,objectId,route,label)=>({type,...(objectId?{id:objectId}:{}),route,label});
+  const draftForJob=job=>drafts.find(d=>d.id===job.draftId);
+  const failureText={uncertain:'已提交但发布结果待核对，不能直接重发',blocked:'发布前检查未通过，需要先处理阻碍',failed:'发布任务失败，请打开记录核对原因'};
+  for(const job of publishingIssues.slice(0,6)){
+    const draft=draftForJob(job);
+    plan('job:'+job.id,(job.status==='uncertain'?'核对发布结果：':'处理发布任务：')+(draft?.title||job.title||'未命名任务'),failureText[job.status],draft?[internalSource('draft',draft)]:[],{kind:'publishing',priority:'high',blockers:[failureText[job.status]],jobId:job.id,...(draft?{draftId:draft.id}:{}),action:action('publication',job.id,'#queue','查看发布任务')});
   }
-  for(const draft of state.drafts.filter(d=>d.accountId===account.id&&d.status==='draft').slice(0,2))plan('draft:'+draft.id,'完善草稿：'+draft.title,'核对产品阶段、使用条件和配图，再决定是否排期。',[internalSource('draft',draft)],{draftId:draft.id});
-  const matches=rankedTrends(state,account).filter(m=>m.score>0&&!m.stale&&validTime(m.updatedAt)&&dailyKey(new Date(m.updatedAt),timezone)===day).slice(0,5);
-  for(const match of matches){
-    discoveries.push({id:hash(day+'|'+match.id),title:match.title,detail:match.reason+'。可先讨论与 '+state.product.name+' 的实际关联，再决定是否创作。',score:match.score,sources:match.sources.filter(s=>!s.stale&&validTime(s.fetchedAt)&&dailyKey(new Date(s.fetchedAt),timezone)===day),matchId:match.id});
+  const generationReasons={source_failed:'链接读取失败或缺少正文截图',source_changed:'生成期间资料发生变化',ai_timeout:'AI 生成超时',ai_unconfigured:'AI 尚未配置',asset_unavailable:'所选素材不可读取',interrupted:'服务重启中断了任务',provider_error:'AI 服务未完成本次生成'};
+  for(const job of generationIssues.slice(0,4)){
+    const reference=references.find(r=>r.id===job.referenceId),reason=generationReasons[job.reasonCode]||'生成任务未完成';
+    plan('generation:'+job.id,'重新生成：'+(reference?.title||'产品草稿'),reason+'；原收藏与输入已保留，可在创作台重试。',reference?[internalSource('reference',reference)]:[],{kind:'generation',priority:'high',blockers:[reason],generationJobId:job.id,action:action('generation',job.id,'#write','查看生成任务')});
   }
-  for(const ref of state.inspirations.filter(r=>r.creatorIds?.length&&r.pageContent&&dailyKey(new Date(r.pageContent.readAt||r.createdAt),timezone)===day).slice(0,3))discoveries.push({id:hash(day+'|ref|'+ref.id),title:'新入库参考：'+ref.title,detail:ref.analysis?.adaptation||'已保存来源资料，可先拆解选题和表达，再结合自己的产品事实。',sources:[internalSource('reference',ref)],referenceId:ref.id});
+  for(const draft of pending.slice(0,6)){
+    let blockers;try{blockers=checks(draft,state.product,state.productAssets||[]);}catch{blockers=['请打开草稿核对资料与格式'];}
+    plan('draft:'+draft.id,'核对草稿：'+draft.title,blockers.length?`有 ${blockers.length} 项需要核对，处理后再排期。`:'已具备核对条件，确认正文和图片后再排期。',[internalSource('draft',draft)],{kind:'review',priority:blockers.length?'high':'normal',blockers,draftId:draft.id,action:action('draft',draft.id,'#draft/'+draft.id,'打开草稿')});
+  }
+  for(const job of scheduled.filter(j=>!['published','cancelled','blocked','failed','uncertain'].includes(j.status)).slice(0,4)){
+    const draft=draftForJob(job);if(!draft)continue;const time=dateParts(new Date(job.scheduledAt),timezone);
+    plan('job:'+job.id,'确认今日排期：'+draft.title,'计划 '+time.hour+':'+time.minute+'；以发布任务的实际状态为准。',[internalSource('draft',draft)],{kind:'publishing',priority:'normal',jobId:job.id,draftId:draft.id,action:action('publication',job.id,'#queue','查看发布任务')});
+  }
+  const needsRead=newReferences.filter(r=>r.url&&(!r.text&&!r.assets?.length||['failed','needs_login','blocked','unavailable'].includes(r.linkRead?.status)));
+  for(const reference of needsRead.slice(0,3))plan('source:'+reference.id,'补齐参考内容：'+reference.title,'链接已收藏，读取完整正文或补充截图后即可直接生成草稿。',[internalSource('reference',reference)],{kind:'source',priority:'normal',blockers:[reference.linkRead?.status==='needs_login'?'需要登录来源平台':'参考正文或截图尚未就绪'],referenceId:reference.id,action:action('reference',reference.id,'#reference/'+reference.id,'打开收藏')});
+  const sync=state.feishuSync,latestSync=(state.feishuJobs||[]).find(j=>visible(j)&&before(j.completedAt));
+  if(sync&&['partial','failed','needs_login','blocked','unavailable'].includes(sync.status)&&before(sync.lastAttemptAt)){
+    issues.push('共用产品资料同步尚未完整完成，旧快照不会被当作新实测依据');
+    plan('sync:feishu','核对产品资料同步',latestSync?.documentCount?`最近一次读取了 ${latestSync.documentCount} 份文档，仍有资料需要核对。`:'检查文档登录与访问权限，补齐可供创作的产品事实。',(state.product.sources||[]).slice(0,2).map(url=>({title:'产品资料',url})),{kind:'sync',priority:'high',blockers:['部分资料未完整同步'],action:action('product',null,'#product','查看产品资料')});
+  }
+  const recentReferences=references.filter(r=>onDay(r.createdAt)||r.creatorIds?.length&&onDay(r.pageContent?.readAt)).sort((a,b)=>String(b.pageContent?.readAt||b.createdAt||'').localeCompare(String(a.pageContent?.readAt||a.createdAt||''))).slice(0,5);
+  for(const reference of recentReferences){const creator=reference.creatorIds?.length?(state.creators||[]).find(c=>reference.creatorIds.includes(c.id)&&visible(c)):null,readable=Boolean(reference.text||reference.assets?.length);
+    const reason=ownedReferences.has(reference.id)?'已被本账号的草稿、选题或讨论引用':'按共享资料库中的账号方向与产品关键词关联';
+    discoveries.push({id:hash(day+'|ref|'+reference.id),kind:creator?'creator':'reference',title:(creator?'博主动态：':'新收藏：')+reference.title,detail:(creator?creator.name+' 的关联参考已入库。':'关联参考已保存。')+(readable?'可直接结合产品事实创作，无需先做额外拆解。':'先读取链接或补充截图，再生成草稿。'),reason,nextAction:readable?'结合自有产品事实生成原创草稿':'补齐参考正文或截图',sources:[internalSource('reference',reference)],referenceId:reference.id,...(creator?{creatorId:creator.id}:{}),action:action('reference',reference.id,'#reference/'+reference.id,'打开收藏')});
+  }
+  for(const match of rankedTrends(state,account).filter(m=>m.score>0)){
+    const sources=match.sources.filter(source=>!source.stale&&onDay(source.fetchedAt));if(!sources.length)continue;
+    discoveries.push({id:hash(day+'|'+match.id),kind:'trend',title:match.title,detail:match.reason+'。先核对与 '+state.product.name+' 的实际关联，再决定是否创作。',reason:match.reason,nextAction:'讨论具体场景或存入选题池',score:match.score,scoreMethod:match.scoreMethod,sources,matchId:match.id,action:action('trends',match.id,'#trends','查看热点')});
+    if(discoveries.filter(item=>item.kind==='trend').length>=5)break;
+  }
   if(!plans.length&&discoveries.length){const first=discoveries[0];plan('topic:'+first.id,'评估选题：'+first.title,'核对账号方向与产品资料，确定一个具体使用场景。',first.sources,{discoveryId:first.id});}
-  if(!plans.length&&state.product.sources.length)plan('product:'+state.product.version,'核对 '+state.product.name+' 产品资料','当前阶段：'+state.product.stage+'；确认资料是否需要更新。',state.product.sources.slice(0,2).map(url=>({title:'产品资料',url})));
-  if(!state.trendBoards.some(b=>!b.stale&&['ready','partial'].includes(b.status)&&b.items.length&&validTime(b.fetchedAt)&&dailyKey(new Date(b.fetchedAt),timezone)===day))issues.push('该日期没有可用的热榜快照，日报仅使用本地资料');
+  if(!plans.length&&state.product.sources.length)plan('product:'+state.product.version,'核对 '+state.product.name+' 产品资料','当前阶段：'+state.product.stage+'；确认资料是否需要更新。',state.product.sources.slice(0,2).map(url=>({title:'产品资料',url})),{kind:'source',priority:'low',action:action('product',null,'#product','查看产品资料')});
+  const priority={high:0,normal:1,low:2};plans.sort((a,b)=>priority[a.priority]-priority[b.priority]);
+  const visiblePlans=plans.slice(0,12);for(const previous of prior?.plans||[])if(previous.done&&!visiblePlans.some(p=>p.key===previous.key))visiblePlans.push({...structuredClone(previous),retained:true});
+  if(!readableBoards.length)issues.push('该日期没有可用的热榜快照，日报仅使用本地资料');
   if(state.trendBoards.some(b=>b.stale||!['ready','partial'].includes(b.status)))issues.push('部分平台榜单未能读取，未补造数据');
-  return {id:prior?.id||id(),accountId:account.id,date:day,status:issues.length?'partial':'ready',plans,discoveries,issues,
-    accountDirection:account.notes||'',method:'verified-data-rules',generatedAt:now(),productVersion:state.product.version};
+  if(publishingIssues.length)issues.push(`有 ${publishingIssues.length} 个发布任务需要处理，未自动重发`);
+  if(generationIssues.length)issues.push(`有 ${generationIssues.length} 个草稿生成任务未完成，原输入仍保留`);
+  Object.assign(snapshot,{draftCount:drafts.length,jobCount:jobs.length,referenceCount:references.length,sourceCount:new Set([...visiblePlans,...discoveries].flatMap(item=>(item.sources||[]).map(source=>source.url))).size,readableBoardCount:readableBoards.length});
+  return {id:prior?.id||id(),accountId:account.id,date:day,timezone,status:issues.length?'partial':'ready',plans:visiblePlans,discoveries,metrics,issues,
+    accountDirection:account.notes||'',method:'verified-data-rules',generatedAt:capturedAt,productVersion:state.product.version,snapshot};
 }
 
 export function createDiscussion(state,account,input) {

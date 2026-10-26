@@ -33,6 +33,8 @@ export function createAIRequest({baseUrl=DEFAULT_BASE,key,model,wireApi='chat',s
 }
 
 function invalid(){return new InputError('模型未返回完整有效的 JSON，请检查模型及接口协议',502);}
+const timeoutFailure=()=>new InputError('AI 请求超时，未保存生成结果',504);
+const isTimeout=error=>error?.status===504||['TimeoutError','AbortError'].includes(error?.name);
 
 async function readBounded(response,maxBytes){
   if(!Number.isSafeInteger(maxBytes)||maxBytes<1)throw invalid();
@@ -42,7 +44,7 @@ async function readBounded(response,maxBytes){
   const chunks=[];let size=0;
   try{
     for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>maxBytes){await reader.cancel().catch(()=>{});throw invalid();}chunks.push(value);}
-  }catch{throw invalid();}
+  }catch(error){if(isTimeout(error))throw timeoutFailure();throw invalid();}
   finally{reader.releaseLock();}
   return Buffer.concat(chunks,size).toString('utf8');
 }
@@ -97,5 +99,5 @@ export async function readAIResponse(response,{wireApi='chat',maxBytes=DEFAULT_R
     }
     if(!result||typeof result!=='object'||Array.isArray(result))throw invalid();
     return result;
-  }catch{throw invalid();}
+  }catch(error){if(isTimeout(error))throw timeoutFailure();throw invalid();}
 }

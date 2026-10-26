@@ -58,7 +58,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     accounts:Object.fromEntries(store.state.accounts.map(account=>[account.id,{publisher:account.publisherDriver==='chrome'?nativeReady(account):bridgeReady()&&Boolean(account.bridgeAccountId)}])),
     feishu:true,linkReader:true});
   // Persist a result-unknown state after restart; never automatically retry an interrupted write.
-  await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];s.imageJobs ||= [];for(const j of s.imageJobs)if(['queued','generating'].includes(j.status)){j.status='failed';j.error='服务已重启，生成结果未知；未自动重试，请先核对图片服务记录';j.completedAt=now();}for(const d of s.drafts){d.contentMode ||= 'image';d.productAssetIds ||= [];if(d.contentMode==='text'){d.productAssetIds=[];d.slides=[];}}for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs){j.contentMode ||= s.drafts.find(d=>d.id===j.draftId)?.contentMode||'image';if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}}});
+  await store.mutate(s=>{s.productAssets ||= [];s.productRenders ||= [];s.imageJobs ||= [];s.draftGenerationJobs ||= [];for(const j of s.draftGenerationJobs)if(['queued','running'].includes(j.status))Object.assign(j,{status:'failed',phase:'failed',reasonCode:'interrupted',error:'服务已重启，草稿生成已停止；请重新生成，不会自动重复调用 AI',errorStatus:409,completedAt:now()});for(const j of s.imageJobs)if(['queued','generating'].includes(j.status)){j.status='failed';j.error='服务已重启，生成结果未知；未自动重试，请先核对图片服务记录';j.completedAt=now();}for(const d of s.drafts){d.contentMode ||= 'image';d.productAssetIds ||= [];if(d.contentMode==='text'){d.productAssetIds=[];d.slides=[];}}for(const r of s.productRenders)if(['queued','running'].includes(r.status)){r.status='failed';r.error='服务已重启，请重新生成';}for(const j of s.jobs){j.contentMode ||= s.drafts.find(d=>d.id===j.draftId)?.contentMode||'image';if(j.status==='publishing'){j.status='uncertain';j.error='服务重启，发布结果需要核对';}}});
   await store.mutate(s=>{for(const r of s.inspirations){
     r.userFields ||= {title:!['未命名灵感','链接灵感'].includes(r.title),text:Boolean(r.text),tags:Boolean(r.tags?.length)};
     r.manualAssets ||= [...(r.assets||[])];
@@ -77,7 +77,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     const account=accountById(s,accountId);
     const ref=referenceId?requireItem(s.inspirations,referenceId):null;
     const useAI=method!=='template'&&aiReady(env);
-    const selected=draftMode==='text'?[]:selectedProductAssets(s,productAssetIds ?? s.productAssets.filter(a=>a.kind==='image').slice(-2).map(a=>a.id));
+    const selected=draftMode==='text'?[]:selectedProductAssets(s,productAssetIds ?? s.productAssets.filter(a=>a.kind==='image'&&a.metadata?.testOnly!==true).slice(-2).map(a=>a.id));
     const materialCatalog=selected.map(a=>({id:a.id,name:a.name,kind:a.kind,description:a.description}));
     const accountInstruction=`账号：${account.name}。账号类型：${account.type==='official'?'官方':'普通'}。账号定位与备注：${account.notes || '无'}。本次要求：${instruction}。可用自有产品素材：${JSON.stringify(materialCatalog)}。产品素材仅用于外观和品牌参考，不作为功能实测依据。`;
     const data=useAI?await generate(env,productForAI(s),ref,accountInstruction,mode,[...(ref?await imagesFor(ref,root,directory):[]),...await productVisionImages(selected,directory)],fetcher,draftMode):templateDraft(s.product,ref,instruction,draftMode);
@@ -131,7 +131,108 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     } catch {j.status='uncertain';j.error='发布器请求未完成或返回异常；为防止重复发布，不会自动重发';}
     store.event(s,'publish',`[${j.accountName}] ${j.status==='published'?'已核对发布':'待核对'}：${j.title}`);
   }
-  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),creatorQueue=Promise.resolve(),analysisQueue=Promise.resolve(),trendQueue=Promise.resolve(),reportQueue=Promise.resolve(),feishuQueue=Promise.resolve(),nativeQueue=Promise.resolve(),closing=false;
+  let renderQueue=Promise.resolve(),imageQueue=Promise.resolve(),readerQueue=Promise.resolve(),creatorQueue=Promise.resolve(),analysisQueue=Promise.resolve(),trendQueue=Promise.resolve(),reportQueue=Promise.resolve(),feishuQueue=Promise.resolve(),nativeQueue=Promise.resolve(),draftGenerationQueue=Promise.resolve(),closing=false;
+  const draftGenerationPromises=new Map(),linkReadPromises=new Map();
+  const digestValue=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const generationActive=job=>['queued','running'].includes(job.status);
+  const sourceMaterial=reference=>Boolean(reference&&(reference.text?.trim()||reference.assets?.length));
+  const sourceSignature=reference=>reference?digestValue({title:reference.title,url:reference.url,note:reference.note,text:reference.text,tags:reference.tags,assets:reference.assets,analysis:reference.analysis,scope:reference.scope,page:reference.pageContent&&{kind:reference.pageContent.kind,title:reference.pageContent.title,text:reference.pageContent.text,author:reference.pageContent.author,tags:reference.pageContent.tags,assets:reference.pageContent.assets,canonicalUrl:reference.pageContent.canonicalUrl,missing:reference.pageContent.missing}}):null;
+  const manualSourceSignature=reference=>reference?digestValue({url:reference.url,note:reference.note,manualAssets:reference.manualAssets,title:reference.userFields?.title?reference.title:null,text:reference.userFields?.text?reference.text:null,tags:reference.userFields?.tags?reference.tags:null}):null;
+  const generationAccountSignature=account=>digestValue({id:account.id,name:account.name,type:account.type,notes:account.notes,enabled:account.enabled,archived:account.archived});
+  const discussionSignature=chat=>chat?digestValue({accountId:chat.accountId,title:chat.title,brief:chat.brief,sources:chat.sources,topicId:chat.topicId,messages:chat.messages.slice(-6).map(m=>({role:m.role,content:m.content}))}):null;
+  function generationError(reasonCode,error,status=409){const value=new InputError(error,status);value.generationReason=reasonCode;return value;}
+  function normalizedGenerationInput(input){
+    const method=input.method===undefined?'auto':input.method;if(!['auto','ai','template'].includes(method))throw new InputError('生成方式不正确');
+    const optional=value=>value===undefined||value===null||value===''?null:str(value,160,true);
+    const assets=input.productAssetIds===undefined?null:input.productAssetIds;
+    if(assets!==null&&(!Array.isArray(assets)||assets.length>9||assets.some(value=>typeof value!=='string'||!value||value.length>160)))throw new InputError('最多选择 9 个产品图片或图标');
+    const clientRequestId=optional(input.clientRequestId);if(clientRequestId&&!/^[A-Za-z0-9._:-]{1,120}$/.test(clientRequestId))throw new InputError('生成请求标识不正确');
+    return {request:{referenceId:optional(input.referenceId),discussionId:optional(input.discussionId),accountId:optional(input.accountId),instruction:str(input.instruction||'',2000),mode:str(input.mode||'综合借鉴',80),method,contentMode:contentMode(input.contentMode),productAssetIds:assets===null?null:[...new Set(assets)]},clientRequestId};
+  }
+  function generationContext(s,job){
+    const account=accountById(s,job.accountId),reference=job.referenceId?requireItem(s.inspirations,job.referenceId):null,chat=job.discussionId?requireItem(s.discussions,job.discussionId):null;
+    const selected=job.contentMode==='text'?[]:selectedProductAssets(s,job.productAssetIds);
+    return {account,reference,chat,selected,productVersion:s.product.version,accountSignature:generationAccountSignature(account),sourceSignature:sourceSignature(reference),manualSourceSignature:manualSourceSignature(reference),assetSignature:digestValue(selected),discussionSignature:discussionSignature(chat)};
+  }
+  function assertGenerationContext(s,job,{afterRead=false}={}){
+    let current;try{current=generationContext(s,job);}catch{throw generationError('source_changed','账号、参考或素材已变化，请检查后重新生成');}
+    const before=job.context;
+    if(current.productVersion!==before.productVersion||current.accountSignature!==before.accountSignature||current.assetSignature!==before.assetSignature||current.discussionSignature!==before.discussionSignature||current.manualSourceSignature!==before.manualSourceSignature||(current.reference?.linkRead?.attemptId||null)!==before.sourceReadAttemptId||before.sourceSignature!==null&&current.sourceSignature!==before.sourceSignature)throw generationError('source_changed','产品、账号、参考或素材已变化，请重新生成');
+    if(afterRead&&before.readerAttemptId&&current.reference?.linkRead?.attemptId!==before.readerAttemptId)throw generationError('source_changed','链接读取任务已变化，请重新生成');
+    return current;
+  }
+  function queueDraftGeneration(s,input){
+    const {request,clientRequestId}=normalizedGenerationInput(input),requestFingerprint=digestValue(request);
+    if(clientRequestId){const previous=s.draftGenerationJobs.find(job=>(job.clientRequestIds||[job.clientRequestId]).includes(clientRequestId));if(previous){if(previous.requestFingerprint!==requestFingerprint)throw new InputError('同一生成请求标识不能用于不同内容',409);return previous;}}
+    const chat=request.discussionId?requireItem(s.discussions,request.discussionId):null;
+    if(chat?.status==='waiting')throw new InputError('请等讨论回复后生成草稿',409);
+    if(chat&&request.accountId&&request.accountId!==chat.accountId)throw new InputError('讨论与目标账号不一致',409);
+    const referenceId=request.referenceId||chat?.sources.find(source=>source.kind==='reference')?.id||null;
+    if(chat&&request.referenceId&&request.referenceId!==chat.sources.find(source=>source.kind==='reference')?.id)throw new InputError('讨论与所选参考不一致',409);
+    const account=accountById(s,request.accountId||chat?.accountId||s.defaultAccountId),reference=referenceId?requireItem(s.inspirations,referenceId):null;
+    const resolvedMethod=request.method!=='template'&&aiReady(env)?'ai':'template';
+    if(request.method==='ai'&&resolvedMethod!=='ai')throw generationError('ai_unconfigured','AI 未配置，请选择本地事实模板');
+    const waiting=resolvedMethod==='ai'&&reference&&['queued','reading'].includes(reference.linkRead?.status);
+    if(resolvedMethod==='ai'&&reference&&!sourceMaterial(reference)&&!waiting)throw generationError('source_pending','请先重读链接，或补充截图、正文后再生成');
+    const selected=request.contentMode==='text'?[]:selectedProductAssets(s,request.productAssetIds??s.productAssets.filter(a=>a.kind==='image'&&a.metadata?.testOnly!==true).slice(-2).map(a=>a.id));
+    const active=s.draftGenerationJobs.find(job=>generationActive(job)&&job.accountId===account.id&&job.requestFingerprint===requestFingerprint);
+    if(active){if(clientRequestId){active.clientRequestIds ||= active.clientRequestId?[active.clientRequestId]:[];if(active.clientRequestIds.length>=100)throw new InputError('这项任务的重复请求较多，请等待完成',409);active.clientRequestIds.push(clientRequestId);active.clientRequestId ||= clientRequestId;}return active;}
+    if(s.draftGenerationJobs.filter(generationActive).length>=20)throw new InputError('生成任务较多，请等待现有任务完成',409);
+    const job={...request,referenceId,accountId:account.id,productAssetIds:selected.map(a=>a.id),id:id(),status:'queued',phase:'queued',resolvedMethod,clientRequestId,clientRequestIds:clientRequestId?[clientRequestId]:[],requestFingerprint,draftId:null,error:null,reasonCode:null,createdAt:now()};
+    job.context={productVersion:s.product.version,accountSignature:generationAccountSignature(account),sourceSignature:waiting?null:sourceSignature(reference),manualSourceSignature:manualSourceSignature(reference),assetSignature:digestValue(selected),discussionSignature:discussionSignature(chat),readerAttemptId:waiting?reference.linkRead.attemptId:null,sourceReadAttemptId:reference?.linkRead?.attemptId||null};
+    s.draftGenerationJobs.unshift(job);return job;
+  }
+  function prepareGeneration(s,job){
+    const current=assertGenerationContext(s,job,{afterRead:true});
+    if(job.resolvedMethod==='ai'&&!aiReady(env))throw generationError('ai_unconfigured','AI 配置已变化，请检查设置后重新生成');
+    if(job.context.readerAttemptId&&!['ready','partial'].includes(current.reference?.linkRead?.status))throw generationError('source_failed','链接重读尚未完成或失败，请重读链接或上传截图后重试');
+    if(job.resolvedMethod==='ai'&&current.reference&&!sourceMaterial(current.reference))throw generationError('source_failed','链接未读取到正文或截图，请重读链接或上传截图后重试');
+    if(job.context.sourceSignature===null&&current.reference)job.context.sourceSignature=current.sourceSignature;
+    const instruction=current.chat?('额外要求：'+job.instruction+'\n围绕以下选题生成原创稿件，来源只作为选题与表达参考。\n选题：'+current.chat.title+'\n需求：'+current.chat.brief+'\n讨论：'+current.chat.messages.slice(-6).map(m=>m.role+'：'+m.content.slice(0,800)).join('\n')).slice(0,2000):job.instruction;
+    job.phase='preparing';return {account:structuredClone(current.account),reference:structuredClone(current.reference),selected:structuredClone(current.selected),chat:structuredClone(current.chat),product:structuredClone(productForAI(s)),instruction,resolvedMethod:job.resolvedMethod,env:{...env}};
+  }
+  function draftGenerationFailure(error,phase){
+    const failures={source_changed:'产品、账号、参考或素材已变化，请重新生成',source_pending:'请先重读链接，或补充截图、正文后再生成',source_failed:'链接未读取到正文或截图，请重读链接或上传截图后重试',ai_unconfigured:'AI 未配置，请检查设置或选择本地事实模板'};
+    if(typeof error?.generationReason==='string'&&Object.hasOwn(failures,error.generationReason))return {reasonCode:error.generationReason,error:failures[error.generationReason],errorStatus:409};
+    if(error?.status===504||['TimeoutError','AbortError'].includes(error?.name))return {reasonCode:'ai_timeout',error:'AI 生成超过 90 秒仍未完成，请稍后重试或检查服务状态',errorStatus:504};
+    if(phase==='preparing')return {reasonCode:'asset_unavailable',error:'图片或素材读取失败，请检查素材后重新生成',errorStatus:409};
+    return {reasonCode:'provider_error',error:'AI 生成未完成，请检查模型、服务额度或配置后重试；收藏已保留',errorStatus:502};
+  }
+  function scheduleDraftGeneration(jobId){
+    if(draftGenerationPromises.has(jobId))return draftGenerationPromises.get(jobId);
+    const task=draftGenerationQueue.then(async()=>{
+      if(closing)return;
+      let phase='preparing';
+      try{
+        let request=await store.mutate(s=>{const job=requireItem(s.draftGenerationJobs,jobId);if(job.status!=='queued')return null;const current=assertGenerationContext(s,job);job.status='running';job.startedAt=now();
+          if(job.context.readerAttemptId&&['queued','reading'].includes(current.reference?.linkRead?.status)){job.phase='reading';return {reading:true,referenceId:job.referenceId,attemptId:job.context.readerAttemptId};}
+          return prepareGeneration(s,job);
+        });
+        if(!request)return;
+        if(request.reading){phase='reading';await scheduleLinkRead(request.referenceId,request.attemptId);request=await store.mutate(s=>prepareGeneration(s,requireItem(s.draftGenerationJobs,jobId)));}
+        phase='preparing';
+        const files=await Promise.all(request.selected.map(async asset=>{const filename=await readableAssetFile(asset,directory),info=await stat(filename);return {assetId:asset.id,filename,size:info.size,mtimeMs:info.mtimeMs,ino:info.ino};}));
+        const images=request.reference&&request.resolvedMethod==='ai'?await imagesFor(request.reference,root,directory):[];
+        const productImages=request.resolvedMethod==='ai'?await productVisionImages(request.selected,directory):[];
+        const execution=await store.mutate(s=>{const job=requireItem(s.draftGenerationJobs,jobId);assertGenerationContext(s,job);job.phase='generating';return {method:job.resolvedMethod,mode:job.mode,contentMode:job.contentMode};});
+        phase='generating';
+        const materialCatalog=request.selected.map(a=>({id:a.id,name:a.name,kind:a.kind,description:a.description}));
+        const instruction=`账号：${request.account.name}。账号类型：${request.account.type==='official'?'官方':'普通'}。账号定位与备注：${request.account.notes||'无'}。本次要求：${request.instruction}。可用自有产品素材：${JSON.stringify(materialCatalog)}。产品素材仅用于外观和品牌参考，不作为功能实测依据。`;
+        const data=execution.method==='ai'?await generate(request.env,request.product,request.reference,instruction,execution.mode,[...images,...productImages],fetcher,execution.contentMode):templateDraft(request.product,request.reference,request.instruction,execution.contentMode);
+        for(const proof of files){let info;try{info=await stat(proof.filename);}catch{throw generationError('source_changed','所选素材已删除或移动，请检查后重新生成');}if(info.size!==proof.size||info.mtimeMs!==proof.mtimeMs||info.ino!==proof.ino)throw generationError('source_changed','所选素材已改变，请重新生成');}
+        phase='saving';
+        await store.mutate(s=>{const job=requireItem(s.draftGenerationJobs,jobId),current=assertGenerationContext(s,job);job.phase='saving';
+          let draft=s.drafts.find(d=>d.generationJobId===job.id);
+          if(!draft){draft={...data,contentMode:job.contentMode,id:id(),generationJobId:job.id,productAssetIds:[...job.productAssetIds],accountId:job.accountId,referenceIds:job.referenceId?[job.referenceId]:[],instruction:job.instruction,mode:job.mode,productVersion:s.product.version,status:'draft',approved:false,createdAt:now(),updatedAt:now(),history:[],revision:1};
+            if(current.chat){draft.sourceLinks=structuredClone(current.chat.sources);draft.discussionId=current.chat.id;if(current.chat.topicId)draft.topicId=current.chat.topicId;current.chat.draftIds ||= [];current.chat.draftIds.push(draft.id);current.chat.updatedAt=now();const topic=s.topicPool.find(t=>t.id===current.chat.topicId);if(topic){topic.status='used';topic.updatedAt=now();}}
+            s.drafts.unshift(draft);if(current.reference)current.reference.uses=(current.reference.uses||0)+1;store.event(s,'generation',`[${current.account.name}] ${draft.method==='ai'?'AI':'本地模板'}生成：${draft.title}`);
+          }
+          Object.assign(job,{status:'completed',phase:'completed',draftId:draft.id,error:null,reasonCode:null,completedAt:now()});
+        });
+      }catch(error){await store.mutate(s=>{const job=s.draftGenerationJobs.find(j=>j.id===jobId);if(job&&job.status!=='completed')Object.assign(job,{status:'failed',phase:'failed',...draftGenerationFailure(error,phase),completedAt:now()});});}
+    }).catch(error=>console.error('Draft generation queue failed:',error.name));
+    draftGenerationQueue=task;draftGenerationPromises.set(jobId,task);task.finally(()=>draftGenerationPromises.delete(jobId));return task;
+  }
   const queuedNative=new Set();
   function scheduleNativePublish(jobId,verify){
     if(queuedNative.has(jobId))return;queuedNative.add(jobId);
@@ -210,21 +311,26 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       try{
         const request=await store.mutate(s=>{
           const job=requireItem(s.reportJobs,jobId);if(job.status!=='queued')return null;
-          accountById(s,job.accountId);job.status='running';job.startedAt=now();
+          const account=accountById(s,job.accountId);job.status='running';job.phase='collecting';job.startedAt=now();
+          const base=Number.isFinite(Date.parse(job.requestedAt))?Date.parse(job.requestedAt):Date.now(),elapsed=Number.isFinite(Date.parse(job.createdAt))?Math.max(0,Date.now()-Date.parse(job.createdAt)):0;
+          if(job.date!==dailyKey(new Date(base+elapsed),job.timezone||account.reportSettings.timezone)){job.phase='building';return {trendJobId:null};}
           const active=s.trendRefreshJobs.find(editorialActive);
           if(active){job.trendJobId=active.id;return {trendJobId:active.id};}
           if(job.trendJobId&&s.trendRefreshJobs.some(j=>j.id===job.trendJobId))return {trendJobId:null};
-          const last=s.trendRefreshJobs[0],recent=last?.completedAt&&Date.now()-Date.parse(last.completedAt)<15*60*1000;
+          const last=s.trendRefreshJobs[0],recent=['completed','partial'].includes(last?.status)&&last?.completedAt&&Date.now()-Date.parse(last.completedAt)<15*60*1000;
           const trendJobId=recent?null:queueTrends(s,'report').id;if(trendJobId)job.trendJobId=trendJobId;
           return {trendJobId};
         });
         if(!request)return;if(request.trendJobId)await scheduleTrends(request.trendJobId);
         await store.mutate(s=>{
-          const job=requireItem(s.reportJobs,jobId),account=accountById(s,job.accountId),report=buildReport(s,account,job.date);
+          const job=requireItem(s.reportJobs,jobId),account=accountById(s,job.accountId);
+          job.phase='building';
+          const base=Number.isFinite(Date.parse(job.requestedAt))?Date.parse(job.requestedAt):Date.now(),elapsed=Number.isFinite(Date.parse(job.createdAt))?Math.max(0,Date.now()-Date.parse(job.createdAt)):0;
+          const report=buildReport(s,{...account,reportSettings:{...account.reportSettings,timezone:job.timezone||account.reportSettings.timezone}},job.date,{asOf:new Date(base+elapsed).toISOString()});
           const index=s.operationReports.findIndex(r=>r.id===report.id);if(index<0)s.operationReports.unshift(report);else s.operationReports[index]=report;
-          Object.assign(job,{status:'completed',reportId:report.id,completedAt:now()});store.event(s,'report',`[${account.name}] 已生成 ${job.date} 运营日报`);
+          Object.assign(job,{status:'completed',phase:'completed',reportId:report.id,completedAt:now()});store.event(s,'report',`[${account.name}] 已生成 ${job.date} 运营日报`);
         });
-      }catch{await store.mutate(s=>{const job=requireItem(s.reportJobs,jobId);Object.assign(job,{status:'failed',error:'日报生成未完成，请检查账号和资料后重试',completedAt:now()});});}
+      }catch{await store.mutate(s=>{const job=requireItem(s.reportJobs,jobId);Object.assign(job,{status:'failed',phase:'failed',error:'日报生成未完成，请检查账号和资料后重试',completedAt:now()});});}
     }).catch(error=>console.error('Report queue failed:',error.name)).finally(()=>queuedReports.delete(jobId));
   }
   function pumpEditorial(){for(const job of store.state.trendRefreshJobs.filter(j=>j.status==='queued'))scheduleTrends(job.id);for(const job of store.state.reportJobs.filter(j=>j.status==='queued'))scheduleReport(job.id);}
@@ -281,7 +387,8 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     reference.linkRead={status:'queued',attemptId:id(),requestedAt:now(),missing:[]};return true;
   }
   function scheduleLinkRead(referenceId,attemptId) {
-    readerQueue=readerQueue.then(async()=>{
+    const key=referenceId+':'+attemptId;if(linkReadPromises.has(key))return linkReadPromises.get(key);
+    const task=readerQueue.then(async()=>{
       if(closing)return;
       let request;
       try {
@@ -339,6 +446,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         if(r?.linkRead?.attemptId===attemptId)Object.assign(r.linkRead,{status:'failed',error:'链接读取未完成，请稍后重读',readAt:now()});
       });}
     }).catch(error=>console.error('Reader queue failed:',error.name));
+    readerQueue=task;linkReadPromises.set(key,task);task.finally(()=>linkReadPromises.delete(key));return task;
   }
   function scheduleCreatorSync(jobId) {
     if(queuedCreators.has(jobId))return;queuedCreators.add(jobId);
@@ -510,7 +618,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
       for(const account of s.accounts.filter(item=>item.enabled&&!item.archived)) {
         const reports=account.reportSettings,rp=dateParts(date,reports.timezone),reportKey=dailyKey(date,reports.timezone);
-        if(reports.enabled&&`${rp.hour}:${rp.minute}`>=reports.time&&reports.lastDailyKey!==reportKey){reports.lastDailyKey=reportKey;const job=queueReport(s,account,reportKey,'daily');if(dailyTrendJob)job.trendJobId=dailyTrendJob.id;}
+        if(reports.enabled&&`${rp.hour}:${rp.minute}`>=reports.time&&reports.lastDailyKey!==reportKey){reports.lastDailyKey=reportKey;const job=queueReport(s,account,reportKey,'daily',date.toISOString());if(dailyTrendJob)job.trendJobId=dailyTrendJob.id;}
         const setting=account.settings,p=dateParts(date,setting.timezone),key=dailyKey(date,setting.timezone);
         if(!setting.enabled||`${p.hour}:${p.minute}`<setting.time||account.lastDailyKey===key)continue;
         account.lastDailyKey=key;
@@ -594,6 +702,19 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           } finally {if(upload)await cleanModelUpload(upload,directory,store.state,committed);}
         }
         const b=await body(req);
+        const legacyDiscussionDraft=pathname.match(/^\/api\/discussions\/([^/]+)\/draft$/);
+        if(req.method==='POST'&&(pathname==='/api/draft-generations'||pathname==='/api/drafts'||legacyDiscussionDraft)){
+          const input=legacyDiscussionDraft?{...b,discussionId:legacyDiscussionDraft[1],method:b.method||'template'}:b;
+          const job=await store.mutate(s=>queueDraftGeneration(s,input));
+          const task=generationActive(job)?scheduleDraftGeneration(job.id):Promise.resolve();
+          if(pathname==='/api/draft-generations')return json(res,job);
+          // Backward-compatible callers still receive a draft, but the external
+          // request runs in the durable queue rather than inside store.mutate.
+          await task;
+          const completed=requireItem(store.state.draftGenerationJobs,job.id);
+          if(completed.status!=='completed')throw new InputError(completed.error||'草稿生成未完成，请重新生成',completed.errorStatus||502);
+          return json(res,requireItem(store.state.drafts,completed.draftId));
+        }
         if(req.method==='PUT'&&pathname==='/api/connections/ai')return json(res,await connections.update(b));
         if(req.method==='POST'&&pathname==='/api/connections/ai/test')return json(res,await connections.test());
         const connectPublisherRoute=pathname.match(/^\/api\/accounts\/([^/]+)\/connect-publisher$/);
@@ -653,16 +774,6 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           const discussionRoute=pathname.match(/^\/api\/discussions\/([^/]+)(?:\/(draft))?$/);
           if(discussionRoute){const chat=requireItem(s.discussions,discussionRoute[1]);accountById(s,chat.accountId);
             if(req.method==='PUT'&&!discussionRoute[2]){if(chat.status==='waiting')throw new InputError('请等讨论回复后再修改需求',409);chat.brief=str(b.brief,6000);chat.updatedAt=now();return chat;}
-            if(req.method==='POST'&&discussionRoute[2]==='draft'){
-              if(chat.status==='waiting')throw new InputError('请等讨论回复后生成草稿',409);
-              const instruction=('围绕以下选题生成原创稿件，来源只作为选题与表达参考，不把热榜或他人产品事实移植为自有事实。\n选题：'+chat.title+'\n需求：'+chat.brief+'\n讨论：'+chat.messages.slice(-6).map(m=>m.role+'：'+m.content.slice(0,800)).join('\n')).slice(0,2000);
-              const reference=chat.sources.find(source=>source.kind==='reference');
-              const draft=await makeDraft(s,reference?.id,instruction,'综合借鉴',b.method||'template',chat.accountId,b.productAssetIds,b.contentMode||'image');
-              draft.sourceLinks=structuredClone(chat.sources);draft.discussionId=chat.id;if(chat.topicId)draft.topicId=chat.topicId;
-              chat.draftIds ||= [];chat.draftIds.push(draft.id);chat.updatedAt=now();
-              const topic=s.topicPool.find(t=>t.id===chat.topicId);if(topic){topic.status='used';topic.updatedAt=now();}
-              return draft;
-            }
           }
           if(req.method==='POST'&&pathname==='/api/creators'){
             const creator=createCreator(s,b);queueCreatorSync(s,creator.id,'initial');store.event(s,'creator','已添加参考博主');return creator;
@@ -739,7 +850,6 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
               store.event(s,'analysis',`完成参考分析：${r.title}`);return r;
             }
           }
-          if(req.method==='POST'&&pathname==='/api/drafts'){return makeDraft(s,b.referenceId,str(b.instruction||'',2000),str(b.mode||'综合借鉴',80),b.method||'auto',b.accountId||s.defaultAccountId,b.productAssetIds,b.contentMode);}
           m=pathname.match(/^\/api\/drafts\/([^/]+)(?:\/(approve|schedule|duplicate))?$/);
           if(m){const d=requireItem(s.drafts,m[1]);
             if(m[2]==='duplicate'&&req.method==='POST'){const target=accountById(s,b.accountId||(accountById(s,d.accountId,true).archived?s.defaultAccountId:d.accountId));const copy={...structuredClone(d),accountId:target.id,id:id(),status:'draft',approved:false,history:[],revision:1,createdAt:now(),updatedAt:now()};s.drafts.unshift(copy);return copy;}
@@ -773,7 +883,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       const ext=path.extname(filename);res.writeHead(200,{'Content-Type':MIME[ext]|| (ext==='.webp'?'image/webp':'application/octet-stream'),'Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:await readFile(filename));
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue,nativeQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await connections.close();await nativePublisher.close?.();await store.close();}};
+  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue,nativeQueue,draftGenerationQueue]);await new Promise(resolve=>server.close(resolve));auth.close();await connections.close();await nativePublisher.close?.();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);
