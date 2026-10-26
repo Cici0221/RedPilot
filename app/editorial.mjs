@@ -17,6 +17,8 @@ export function reportDate(value,timezone='Asia/Shanghai') {
 }
 export function initEditorial(state) {
   state.trendBoards ||= [];state.trendRefreshJobs ||= [];state.topicPool ||= [];state.operationReports ||= [];state.reportJobs ||= [];state.discussions ||= [];
+  state.inspirations ||= [];
+  for(const topic of state.topicPool)if(!topic.referenceId)linkTopicReference(state,topic);
   const previousSchedule=state.trendSchedule||{};
   state.trendSchedule={status:'idle',lastJobId:null,lastAttemptAt:null,lastCompletedAt:null,lastError:null,...previousSchedule,...reportSettings({},previousSchedule)};
   if(!state.trendBoards.length)state.trendBoards=TREND_PLATFORMS.map(p=>({platformId:p.id,name:p.name,boardName:p.boardName,sourceUrl:p.url,status:'unavailable',items:[],fetchedAt:null,stale:false,error:'尚未刷新'}));
@@ -97,7 +99,7 @@ export function editorialSources(state,input,accountId) {
     if(!value||typeof value!=='object')throw new InputError('来源需要标题与链接');
     const title=str(value.title||'来源',200,true),url=str(value.url,4000,true);
     const internal=url.match(/^#(draft|reference)\/([a-zA-Z0-9-]+)$/);
-    if(internal){const record=state[internal[1]==='draft'?'drafts':'inspirations'].find(r=>r.id===internal[2]);if(!record)throw new InputError('来源记录不存在',404);if(internal[1]==='draft'&&record.accountId!==accountId)throw new InputError('草稿来源属于其他账号',409);out.push({title,url,kind:internal[1],id:record.id});continue;}
+    if(internal){const record=state[internal[1]==='draft'?'drafts':'inspirations'].find(r=>r.id===internal[2]);if(!record)throw new InputError('来源记录不存在',404);if(record.accountId&&record.accountId!==accountId||Array.isArray(record.accountIds)&&record.accountIds.length&&!record.accountIds.includes(accountId))throw new InputError('来源属于其他账号',409);out.push({title,url,kind:internal[1],id:record.id});continue;}
     const safe=sourceUrl(url);
     const trusted=TREND_PLATFORMS.some(p=>isOfficialTrendUrl(p.id,safe))||state.product.sources.includes(safe)||state.inspirations.some(r=>r.url===safe||r.canonicalUrl===safe);
     if(!trusted)throw new InputError('来源必须是已验证的平台或资料库链接');
@@ -110,6 +112,28 @@ export function editorialSources(state,input,accountId) {
   }
   return [...new Map(out.map(s=>[(s.platformId||'')+'|'+s.url,s])).values()];
 }
+function linkTopicReference(state,topic) {
+  // Keep legacy topic records intact. Their linked collection is account-scoped;
+  // shared manual references must never be silently reassigned to one account.
+  const sameAccount=reference=>reference.accountId===topic.accountId;
+  let reference=state.inspirations.find(r=>sameAccount(r)&&(r.id===topic.referenceId||r.topicId===topic.id));
+  if(!reference)reference=state.inspirations.find(r=>sameAccount(r)&&r.kind==='topic'&&titleKey(r.title)===titleKey(topic.title));
+  const before=reference?JSON.stringify({text:reference.text,sourceLinks:reference.sourceLinks||[]}):null;
+  const sources=[];
+  for(const source of topic.sources||[])try{sources.push(...editorialSources(state,[source],topic.accountId));}catch{}
+  const sourceLinks=[...new Map([...(reference?.sourceLinks||[]),...sources].map(source=>[(source.platformId||'')+'|'+source.url,source])).values()];
+  const text='选题：'+topic.title+'\n以下仅为保存的选题和来源索引，未读取来源全文，不能据此编造事件细节、数据或产品功能。'+(sourceLinks.length?'\n'+sourceLinks.map(source=>source.title+'：'+source.url).join('\n'):'');
+  if(!reference){
+    reference={id:id(),kind:'topic',topicId:topic.id,accountId:topic.accountId,title:topic.title,url:'',note:'',text,tags:[],assets:[],manualAssets:[],hashes:[],creatorIds:[],userFields:{title:false,text:false,tags:false},pool:typeof topic.pool==='boolean'?topic.pool:true,status:'ready',analysis:null,method:null,scope:'已收藏选题及来源链接，未读取来源全文',uses:0,createdAt:topic.createdAt||now(),updatedAt:topic.updatedAt||now()};
+    state.inspirations.unshift(reference);
+  }else if(reference.kind==='topic'&&!reference.userFields?.text)reference.text=text;
+  reference.sourceLinks=sourceLinks;
+  if(before!==null&&before!==JSON.stringify({text:reference.text,sourceLinks}))Object.assign(reference,{analysis:null,analysisFingerprint:null,method:null,status:'ready',updatedAt:now()});
+  reference.sourceIds=[...new Set([...(reference.sourceIds||[]),...(topic.sourceIds||[])])];
+  reference.topicId ||= topic.id;
+  topic.referenceId=reference.id;
+  return reference;
+}
 export function addTopic(state,account,input) {
   const match=input.matchId?rankedTrends(state,account).find(m=>m.id===input.matchId):null;
   if(input.matchId&&!match)throw new InputError('热点已变化，请刷新后选择',409);
@@ -117,8 +141,8 @@ export function addTopic(state,account,input) {
   const sourceIds=match?.sourceIds||input.sourceIds||[];
   if(!Array.isArray(sourceIds)||sourceIds.length>30||sourceIds.some(v=>typeof v!=='string'||v.length>200))throw new InputError('来源标识列表不正确');
   let topic=state.topicPool.find(t=>t.accountId===account.id&&titleKey(t.title)===titleKey(title));
-  if(topic){topic.sources=[...new Map([...topic.sources,...sources].map(s=>[(s.platformId||'')+'|'+s.url,s])).values()].slice(0,20);topic.sourceIds=[...new Set([...(topic.sourceIds||[]),...sourceIds])].slice(0,30);topic.updatedAt=now();return topic;}
-  topic={id:id(),accountId:account.id,title,sources,sourceIds:[...new Set(sourceIds)],status:'saved',createdAt:now(),updatedAt:now()};state.topicPool.unshift(topic);return topic;
+  if(topic){topic.sources=[...new Map([...topic.sources,...sources].map(s=>[(s.platformId||'')+'|'+s.url,s])).values()].slice(0,20);topic.sourceIds=[...new Set([...(topic.sourceIds||[]),...sourceIds])].slice(0,30);topic.updatedAt=now();linkTopicReference(state,topic);return topic;}
+  topic={id:id(),accountId:account.id,title,sources,sourceIds:[...new Set(sourceIds)],status:'saved',createdAt:now(),updatedAt:now()};state.topicPool.unshift(topic);linkTopicReference(state,topic);return topic;
 }
 export function queueReport(state,account,date,reason='manual',requestedAt=now()) {
   const day=reportDate(date,account.reportSettings.timezone);
@@ -198,12 +222,12 @@ export function buildReport(state,account,day,{asOf=now()}={}) {
   }
   const recentReferences=references.filter(r=>onDay(r.createdAt)||r.creatorIds?.length&&onDay(r.pageContent?.readAt)).sort((a,b)=>String(b.pageContent?.readAt||b.createdAt||'').localeCompare(String(a.pageContent?.readAt||a.createdAt||''))).slice(0,5);
   for(const reference of recentReferences){const creator=reference.creatorIds?.length?(state.creators||[]).find(c=>reference.creatorIds.includes(c.id)&&visible(c)):null,readable=Boolean(reference.text||reference.assets?.length);
-    const reason=ownedReferences.has(reference.id)?'已被本账号的草稿、选题或讨论引用':'按共享资料库中的账号方向与产品关键词关联';
+    const reason=ownedReferences.has(reference.id)?'已被本账号的草稿或收藏引用':'按共享资料库中的账号方向与产品关键词关联';
     discoveries.push({id:hash(day+'|ref|'+reference.id),kind:creator?'creator':'reference',title:(creator?'博主动态：':'新收藏：')+reference.title,detail:(creator?creator.name+' 的关联参考已入库。':'关联参考已保存。')+(readable?'可直接结合产品事实创作，无需先做额外拆解。':'先读取链接或补充截图，再生成草稿。'),reason,nextAction:readable?'结合自有产品事实生成原创草稿':'补齐参考正文或截图',sources:[internalSource('reference',reference)],referenceId:reference.id,...(creator?{creatorId:creator.id}:{}),action:action('reference',reference.id,'#reference/'+reference.id,'打开收藏')});
   }
   for(const match of rankedTrends(state,account).filter(m=>m.score>0)){
     const sources=match.sources.filter(source=>!source.stale&&onDay(source.fetchedAt));if(!sources.length)continue;
-    discoveries.push({id:hash(day+'|'+match.id),kind:'trend',title:match.title,detail:match.reason+'。先核对与 '+state.product.name+' 的实际关联，再决定是否创作。',reason:match.reason,nextAction:'讨论具体场景或存入选题池',score:match.score,scoreMethod:match.scoreMethod,sources,matchId:match.id,action:action('trends',match.id,'#trends','查看热点')});
+    discoveries.push({id:hash(day+'|'+match.id),kind:'trend',title:match.title,detail:match.reason+'。先核对与 '+state.product.name+' 的实际关联，再决定是否创作。',reason:match.reason,nextAction:'收藏或直接生成草稿',score:match.score,scoreMethod:match.scoreMethod,sources,matchId:match.id,action:action('trends',match.id,'#trends','查看热点')});
     if(discoveries.filter(item=>item.kind==='trend').length>=5)break;
   }
   if(!plans.length&&discoveries.length){const first=discoveries[0];plan('topic:'+first.id,'评估选题：'+first.title,'核对账号方向与产品资料，确定一个具体使用场景。',first.sources,{discoveryId:first.id});}

@@ -38,7 +38,7 @@ export function contentMode(value = 'image') {
 export function validateDraft(d) {
   const mode = contentMode(d.contentMode);
   return { contentMode: mode, title: str(d.title, 80, true), body: str(d.body, 8000, true), tags: lines(d.tags, 10),
-    series: str(d.series || '通信小麻烦', 80, true),
+    series: str(d.series ?? '', 80),
     slides: (() => {
       if (mode === 'text') return [];
       const slides = d.slides ?? [];
@@ -53,7 +53,9 @@ export function checks(d, product, assets = []) {
   if ([...d.body].length > 1000) problems.push('正文超过 1000 字，请精简');
   if (d.contentMode !== 'text' && !d.productAssetIds?.some(key => assets.some(a => a.id === key && a.kind === 'image'))) problems.push('请至少选择一张真实产品图作为主图');
   if (d.gaps?.length) problems.push(...d.gaps);
-  const text = `${d.title}\n${d.body}\n${d.slides?.map(s=>s.headline+' '+s.body).join('\n')}`;
+  // Only the title and body are published copy. Legacy storyboard notes stay
+  // readable in saved drafts but cannot add promises or satisfy disclosures.
+  const text = `${d.title}\n${d.body}`;
   const promises = /零延迟|永不漏接|全运营商|全机型|零漫游|双卡同时在线|正式发售|已售\d+|100%/g;
   const claims = [...text.matchAll(promises)].filter(match => {
     const prefix = text.slice(0, match.index).split(/[。！？；;，,\n]/).at(-1);
@@ -71,14 +73,9 @@ export function templateDraft(product, reference, instruction = '', mode = 'imag
   contentMode(mode);
   const name = product.name;
   const custom = instruction.trim();
-  return { contentMode: mode, title: `${name}，先聊聊你的使用场景`, series: '一起打磨',
+  return { contentMode: mode, title: `${name}，先聊聊你的使用场景`, series: '',
     body: `我们是${product.brand}，正在做 ${name}。\n\n${product.summary}\n\n资料中记录的方向：\n${product.facts.map(x=>'· '+x).join('\n')}\n\n先说清条件：\n${product.conditions.map(x=>'· '+x).join('\n')}\n\n当前阶段：${product.stage}。具体表现需要以当前实机测试为准。\n\n你最想解决哪种通信困扰？可以只讲场景，不用留下号码。`,
-    tags: [name, '产品开发', '内测意向'], slides: mode === 'text' ? [] : [
-      {headline: '你想解决的\n通信小麻烦？', body: `${name} · 需求征集`},
-      {headline: '我们正在做什么', body: product.summary},
-      {headline: '使用条件先讲清', body: product.conditions.join('\n')},
-      {headline: '一起把它打磨好', body: `${product.stage}\n你最想先测试什么？`}
-    ], gaps: [], method: 'template', referenceIds: reference ? [reference.id] : [],
+    tags: [name, '产品开发', '内测意向'], slides: [], gaps: [], method: 'template', referenceIds: reference ? [reference.id] : [],
     adaptation: custom ? `你的要求「${custom}」已保存。当前为本地事实模板，尚未用 AI 执行风格改写。` : '本地事实模板；未执行 AI 风格分析或改写。', instruction: custom };
 }
 export function dateParts(date, timezone) {

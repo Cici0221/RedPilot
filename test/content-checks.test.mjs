@@ -24,3 +24,21 @@ test('disclaimers do not remove version, missing-photo or fact-gap checks',()=>{
   const value={...draft('并非正式发售。'),contentMode:'image',productVersion:'old',gaps:['需要核对实机结果']};
   assert.deepEqual(checks(value,product),['产品资料已更新，请重新生成或核对后保存草稿','请至少选择一张真实产品图作为主图','需要核对实机结果']);
 });
+
+test('legacy storyboard claims cannot block otherwise valid title and body copy',()=>{
+  const value={...draft('正在收集使用需求。'),contentMode:'image',productAssetIds:['real-photo'],slides:[{headline:'正式发售，零延迟',body:'100%可靠，全机型兼容，永不漏接。'}]};
+  assert.deepEqual(checks(value,product,[{id:'real-photo',kind:'image'}]),[]);
+});
+
+test('legacy storyboard disclaimers cannot satisfy the actual body stage requirement or hide real copy claims',()=>{
+  const value={...draft(''),body:'正在收集需求。',slides:[{headline:'开发内测',body:'并非正式发售，不保证零延迟。'}]};
+  assert.deepEqual(checks(value,product),['请补充当前产品阶段说明']);
+  for(const text of [{title:'全机型兼容',body:'开发内测。'},{title:'产品进展',body:'开发内测。零延迟。'}])assert.ok(checks({...value,...text},product).some(item=>item.startsWith('请核对宣传表述')));
+});
+
+test('storyboard content never replaces the required real product main image',()=>{
+  const value={...draft('正常使用条件。'),contentMode:'image',productAssetIds:['logo'],slides:[{headline:'真实产品图片',body:'已经配好图片'}]};
+  assert.ok(checks(value,product,[{id:'logo',kind:'icon'}]).some(item=>item.includes('真实产品图')));
+  assert.ok(checks({...value,productAssetIds:['deleted-photo']},product,[]).some(item=>item.includes('真实产品图')));
+  assert.deepEqual(checks({...value,productAssetIds:['photo']},product,[{id:'photo',kind:'image'}]),[]);
+});

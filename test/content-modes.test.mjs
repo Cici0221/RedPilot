@@ -158,6 +158,15 @@ test('image drafts can use a real main image without a storyboard and auto-selec
   assert.equal((await f.request(`drafts/${ready.id}/approve`, {})).status, 200);
 });
 
+test('approval ignores saved auxiliary storyboard promises but still rejects promises in actual copy',async t=>{
+  const f=await fixture(t),asset=await image(f);
+  const legacy=await draft(f,'image',{productAssetIds:[asset.id],slides:[{headline:'正式发售，零延迟',body:'全机型兼容，永不漏接'}]});
+  assert.equal(legacy.slides.length,1,'legacy storyboard remains stored for compatibility');
+  assert.deepEqual((await state(f)).draftChecks[legacy.id],[]);assert.equal((await f.request(`drafts/${legacy.id}/approve`,{})).status,200);
+  ok(await f.request('drafts/'+legacy.id,{...legacy,body:'开发内测。我们承诺全机型兼容。'},'PUT'));
+  const rejected=await f.request(`drafts/${legacy.id}/approve`,{});assert.equal(rejected.status,409);assert.match(rejected.data.error,/全机型/);
+});
+
 test('text mode keeps normal product fact checks instead of bypassing content review', async t => {
   const f = await fixture(t);
   const d = await draft(f, 'text');

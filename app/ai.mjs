@@ -36,8 +36,8 @@ export async function analyze(env, reference, images, product, fetcher) {
 }
 export async function generate(env, product, reference, instruction, mode, images, fetcher, contentMode = 'image') {
   const visual = contentMode === 'text'
-    ? '本次是文字稿，只有标题、正文和话题，slides必须是空数组。正文独立表达完整场景，不依赖图片说明；发布时由小红书发布端使用原生默认配图。不要虚构或仿制原生模板。'
-    : '本次是图文稿，实际配图使用已选自有产品原图或3D渲染图，不强制文字卡。slides可为空数组，若有则只作为辅助图片策划而非实际发布图片。不能要求或冒用竞品图片；无产品原图时注明需要补图，不能凭空伪造产品外形。';
-  const d = await callAI(env, `围绕自有产品生成原创小红书草稿。返回 JSON {"title":"20字内标题","body":"1000字内正文，说明使用条件与当前阶段","tags":["话题不加井号"],"series":"通信小麻烦或接通实验或一起打磨","slides":[{"headline":"不超过30字，允许换行","body":"本页文案不超过150字"}],"gaps":["缺少必须验证的事实或素材；就绪则空数组"],"adaptation":"具体借鉴哪些结构和表达规律"}。${visual}产品：${JSON.stringify(product)}。参考资料：${JSON.stringify(reference)}。借鉴模式：${mode}。用户创作要求：${instruction || '选择适合产品的具体生活场景'}。当前没有实际视频、实测数据；只写资料支持的方向，不虚构已完成演示。`,images,fetcher);
-  return {...validateDraft({...d, contentMode}),adaptation:str(d.adaptation,2000,true),method:'ai'};
+    ? '本次是文字稿，正文独立表达完整场景，不依赖图片说明；发布时由小红书发布端使用原生默认配图。不要虚构或仿制原生模板。'
+    : '本次是图文稿，实际配图使用已选自有产品原图或3D渲染图，不强制文字卡。不能要求或冒用竞品图片；无产品原图时注明需要补图，不能凭空伪造产品外形。';
+  const d = await callAI(env, `围绕自有产品生成原创小红书草稿。返回 JSON {"title":"20字内标题","body":"1000字内正文，说明使用条件与当前阶段","tags":["话题不加井号"],"gaps":["缺少必须验证的事实或素材；就绪则空数组"],"adaptation":"具体借鉴哪些结构和表达规律"}。只生成标题、正文、话题和必要的事实核对信息，不生成辅助分镜、图片策划或固定栏目。${visual}产品：${JSON.stringify(product)}。参考资料：${JSON.stringify(reference)}。借鉴模式：${mode}。用户创作要求：${instruction || '选择适合产品的具体生活场景'}。当前没有实际视频、实测数据；只写资料支持的方向，不虚构已完成演示。`,images,fetcher);
+  return {...validateDraft({...d, contentMode, slides:[], series:''}),adaptation:str(d.adaptation,2000,true),method:'ai'};
 }
