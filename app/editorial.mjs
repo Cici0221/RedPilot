@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {id,now,InputError,str,sourceUrl,dateParts,dailyKey,validateSettings} from './content.mjs';
-import {TREND_PLATFORMS,isOfficialTrendUrl} from './trend-sources.mjs';
+import {TREND_PLATFORMS,isOfficialTrendUrl,safeTrendFailure} from './trend-sources.mjs';
 
 export const editorialActive=job=>['queued','running'].includes(job.status);
 export const titleKey=value=>String(value||'').toLowerCase().replace(/[\p{P}\p{S}\s]+/gu,'');
@@ -17,9 +17,14 @@ export function reportDate(value,timezone='Asia/Shanghai') {
 }
 export function initEditorial(state) {
   state.trendBoards ||= [];state.trendRefreshJobs ||= [];state.topicPool ||= [];state.operationReports ||= [];state.reportJobs ||= [];state.discussions ||= [];
+  const previousSchedule=state.trendSchedule||{};
+  state.trendSchedule={status:'idle',lastJobId:null,lastAttemptAt:null,lastCompletedAt:null,lastError:null,...previousSchedule,...reportSettings({},previousSchedule)};
   if(!state.trendBoards.length)state.trendBoards=TREND_PLATFORMS.map(p=>({platformId:p.id,name:p.name,boardName:p.boardName,sourceUrl:p.url,status:'unavailable',items:[],fetchedAt:null,stale:false,error:'尚未刷新'}));
   for(const a of state.accounts)a.reportSettings=reportSettings({},a.reportSettings);
-  for(const job of [...state.trendRefreshJobs,...state.reportJobs])if(editorialActive(job))Object.assign(job,{status:'failed',error:'服务已重启，请重新生成',completedAt:now()});
+  for(const job of [...state.trendRefreshJobs,...state.reportJobs])if(editorialActive(job)){
+    Object.assign(job,{status:'failed',error:'服务已重启，请重新生成',completedAt:now()});
+    if(job.id===state.trendSchedule.lastJobId)Object.assign(state.trendSchedule,{status:'failed',lastError:'服务重启前的热榜刷新未完成，可手动刷新或等待下次定时更新',lastCompletedAt:job.completedAt});
+  }
   for(const chat of state.discussions)if(chat.status==='waiting')Object.assign(chat,{status:'failed',lastError:'服务已重启，讨论结果未知；未自动重试'});
 }
 export function normalizeBoards(raw,previous=[]) {
@@ -29,9 +34,10 @@ export function normalizeBoards(raw,previous=[]) {
     const attemptedAt=now(),status=['ready','partial','needs_login','blocked','unavailable'].includes(value?.status)?value.status:'unavailable';
     const trusted=value&&isOfficialTrendUrl(platform.id,value.sourceUrl||platform.url);
     const success=trusted&&['ready','partial'].includes(status)&&Array.isArray(value.items);
+    const reasonValue=value&&(value.reasonCode!==undefined||value.error!==undefined)?value:undefined;
     if(!success)return {platformId:platform.id,name:platform.name,boardName:platform.boardName,sourceUrl:old?.sourceUrl||platform.url,
       status:trusted?status:'unavailable',items:old?.items||[],fetchedAt:old?.fetchedAt||null,attemptedAt,stale:Boolean(old?.items?.length),
-      error:status==='needs_login'?'该平台需要登录':status==='blocked'?'该平台暂时限制访问':'本次未读取到可验证榜单'};
+      ...safeTrendFailure(value&&!trusted?'invalid_source':reasonValue,status)};
     const items=[],seen=new Set();
     for(const item of value.items.slice(0,60)){
       if(!item||typeof item.title!=='string'||!item.title.trim()||item.title.length>500||!Number.isInteger(item.rank)||item.rank<1||item.rank>10000||!isOfficialTrendUrl(platform.id,item.url))continue;
@@ -40,10 +46,10 @@ export function normalizeBoards(raw,previous=[]) {
       if(items.length===30)break;
     }
     items.sort((a,b)=>a.rank-b.rank);
-    if(value.items.length&&!items.length)return {platformId:platform.id,name:platform.name,boardName:platform.boardName,sourceUrl:old?.sourceUrl||platform.url,status:'unavailable',items:old?.items||[],fetchedAt:old?.fetchedAt||null,attemptedAt,stale:Boolean(old?.items?.length),error:'本次未读取到有效榜单条目'};
+    if(!items.length)return {platformId:platform.id,name:platform.name,boardName:platform.boardName,sourceUrl:old?.sourceUrl||platform.url,status:'unavailable',items:old?.items||[],fetchedAt:old?.fetchedAt||null,attemptedAt,stale:Boolean(old?.items?.length),...safeTrendFailure(reasonValue||'invalid_response',status)};
     return {platformId:platform.id,name:platform.name,boardName:typeof value.boardName==='string'?value.boardName.slice(0,80):platform.boardName,
       sourceUrl:value.sourceUrl||platform.url,status:items.length===value.items.length?status:'partial',items,
-      fetchedAt:validTime(value.fetchedAt)?value.fetchedAt:attemptedAt,attemptedAt,stale:false,scope:typeof value.scope==='string'?value.scope.slice(0,500):'当前可读取的榜单前30条'};
+      fetchedAt:validTime(value.fetchedAt)?value.fetchedAt:attemptedAt,attemptedAt,stale:false,scope:typeof value.scope==='string'?value.scope.slice(0,500):'当前可读取的榜单前30条',...(reasonValue?safeTrendFailure(reasonValue,status):{})};
   });
 }
 

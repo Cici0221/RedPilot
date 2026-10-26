@@ -76,6 +76,119 @@ async function reportFor(f, accountId, date = '2026-10-26') {
     return finished && s.operationReports.find(report => report.id === finished.reportId);
   }, 'operation report did not finish');
 }
+async function onlyTrendAutomation(f) {
+  await f.store.mutate(s => {
+    for (const account of s.accounts) { account.enabled = false; account.settings.enabled = false; account.reportSettings.enabled = false; }
+    s.feishuSync.enabled = false;
+  });
+}
+async function trendFinished(f, count) {
+  return waitUntil(async () => { const s = await state(f); return s.trendRefreshJobs.length === count && s.trendRefreshJobs.every(job => !['queued', 'running'].includes(job.status)) ? s : false; }, 'scheduled trend refresh did not finish');
+}
+
+test('daily trend settings migrate to Beijing 09:00 and retain an explicitly disabled schedule', async t => {
+  let calls = 0; const f = await fixture(t, { trendReader: async () => { calls++; return boards(); } });
+  await onlyTrendAutomation(f);
+  const initial = (await state(f)).trendSchedule;
+  assert.equal(initial.enabled, true); assert.equal(initial.time, '09:00'); assert.equal(initial.timezone, 'Asia/Shanghai'); assert.equal(initial.lastDailyKey, null);
+  await f.store.mutate(s => { delete s.trendSchedule; }); await f.reopen();
+  assert.equal((await state(f)).trendSchedule.time, '09:00');
+  await f.store.mutate(s => { s.trendSchedule.enabled = false; }); await f.reopen();
+  assert.equal((await state(f)).trendSchedule.enabled, false);
+  await f.tick(new Date('2030-01-02T01:00:00.000Z')); assert.equal(calls, 0);
+});
+
+test('the independent Beijing trend schedule refreshes at 09:00 once per day with all account automation off', async t => {
+  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; return boards(); } }); await onlyTrendAutomation(f);
+  await f.tick(new Date('2030-01-02T00:59:59.000Z')); assert.equal(reads, 0); assert.equal((await state(f)).trendSchedule.lastDailyKey, null);
+  await f.tick(new Date('2030-01-02T01:00:00.000Z')); const first = await trendFinished(f, 1);
+  assert.equal(reads, 1); assert.equal(first.trendSchedule.lastDailyKey, '2030-01-02'); assert.equal(first.trendRefreshJobs[0].reason, 'daily');
+  assert.equal(first.trendSchedule.lastJobId, first.trendRefreshJobs[0].id); assert.equal(first.trendSchedule.status, 'partial'); assert.ok(first.trendSchedule.lastCompletedAt);
+  await Promise.all([f.tick(new Date('2030-01-02T01:00:01.000Z')), f.tick(new Date('2030-01-02T02:00:00.000Z'))]);
+  await f.tick(new Date('2030-01-03T00:59:59.000Z')); assert.equal(reads, 1);
+  await f.tick(new Date('2030-01-03T01:00:00.000Z')); const next = await trendFinished(f, 2);
+  assert.equal(reads, 2); assert.equal(next.trendSchedule.lastDailyKey, '2030-01-03'); assert.equal(next.reportJobs.length, 0); assert.equal(next.jobs.length, 0);
+});
+
+test('trend scheduling uses Asia/Shanghai even when the server host timezone is elsewhere', async t => {
+  const originalTZ = process.env.TZ;
+  t.after(() => { if (originalTZ === undefined) delete process.env.TZ; else process.env.TZ = originalTZ; });
+  for (const timezone of ['UTC', 'America/Los_Angeles']) {
+    process.env.TZ = timezone; let reads = 0;
+    const f = await fixture(t, { trendReader: async () => { reads++; return boards(); } }); await onlyTrendAutomation(f);
+    await f.tick(new Date('2030-01-02T00:59:00.000Z')); assert.equal(reads, 0, timezone);
+    await f.tick(new Date('2030-01-02T01:00:00.000Z')); const current = await trendFinished(f, 1);
+    assert.equal(reads, 1, timezone); assert.equal(current.trendSchedule.lastDailyKey, '2030-01-02');
+  }
+});
+
+test('reopening after Beijing 09:00 catches up once and preserves the daily key across later restarts', async t => {
+  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; return boards(); } }); await onlyTrendAutomation(f);
+  await f.tick(new Date('2030-01-02T00:59:00.000Z')); await f.reopen();
+  await f.tick(new Date('2030-01-02T03:30:00.000Z')); await trendFinished(f, 1); assert.equal(reads, 1);
+  await f.reopen(); await f.tick(new Date('2030-01-02T08:00:00.000Z')); assert.equal(reads, 1);
+  await f.reopen(); await f.tick(new Date('2030-01-03T04:00:00.000Z')); const next = await trendFinished(f, 2);
+  assert.equal(reads, 2); assert.equal(next.trendSchedule.lastDailyKey, '2030-01-03');
+});
+
+test('a manual refresh in flight is preserved and covers the daily refresh without duplicate readers', async t => {
+  let release, reads = 0; const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, { beforeClose: () => release(), trendReader: async () => { reads++; await gate; return boards(); } }); await onlyTrendAutomation(f);
+  const manual = ok(await f.request('trends/refresh', {})); await waitUntil(async () => reads === 1, 'manual reader did not start');
+  await f.tick(new Date('2030-01-02T01:00:00.000Z'));
+  const same = ok(await f.request('trends/refresh', {})), pending = await state(f);
+  assert.equal(same.id, manual.id); assert.equal(pending.trendRefreshJobs.length, 1); assert.equal(pending.trendRefreshJobs[0].reason, 'manual');
+  assert.equal(pending.trendSchedule.lastDailyKey, '2030-01-02'); assert.equal(pending.trendSchedule.lastJobId, manual.id); assert.equal(reads, 1);
+  release(); await trendFinished(f, 1); await refresh(f); assert.equal(reads, 2);
+  await f.tick(new Date('2030-01-02T02:00:00.000Z')); assert.equal(reads, 2); assert.equal((await state(f)).trendSchedule.lastDailyKey, '2030-01-02');
+});
+
+test('failed or interrupted daily refreshes remain visible without repeating every tick and the next day retries', async t => {
+  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; throw Error('not a real network request'); } }); await onlyTrendAutomation(f);
+  await f.tick(new Date('2030-01-02T01:00:00.000Z')); const failed = await trendFinished(f, 1);
+  assert.equal(failed.trendSchedule.status, 'failed'); assert.ok(failed.trendSchedule.lastError);
+  await f.tick(new Date('2030-01-02T03:00:00.000Z')); assert.equal(reads, 1);
+  await f.store.mutate(s => { s.trendSchedule.lastDailyKey = '2030-01-03'; s.trendSchedule.lastJobId = 'interrupted-daily-trend'; s.trendSchedule.status = 'running'; s.trendRefreshJobs.push({ id: 'interrupted-daily-trend', reason: 'daily', status: 'running', createdAt: boardTime }); });
+  await f.reopen(); const interrupted = await state(f);
+  assert.equal(interrupted.trendSchedule.status, 'failed'); assert.match(interrupted.trendSchedule.lastError, /重启/);
+  await f.tick(new Date('2030-01-03T04:00:00.000Z')); assert.equal(reads, 1);
+  await f.tick(new Date('2030-01-04T01:00:00.000Z')); await trendFinished(f, 3); assert.equal(reads, 2);
+});
+
+test('the 09:00 report waits for the scheduled refresh even if a manual snapshot completed moments earlier', async t => {
+  let reads = 0, release; const gate = new Promise(resolve => { release = resolve; });
+  const day = '2030-01-02', title = '手机双卡通信九点新榜';
+  const f = await fixture(t, { beforeClose: () => release(), trendReader: async () => {
+    reads++; if (reads === 2) await gate;
+    return boards().map(board => ({ ...board, fetchedAt: day + (reads === 1 ? 'T00:55:00.000Z' : 'T01:00:00.000Z'), items: board.items.map(item => item.title === '手机双卡通信' ? { ...item, title: reads === 1 ? '手机双卡通信旧榜' : title } : item) }));
+  } });
+  await f.store.mutate(s => { s.feishuSync.enabled = false; });
+  await refresh(f); assert.equal(reads, 1);
+  await f.tick(new Date(day + 'T01:00:00.000Z')); await waitUntil(async () => reads === 2, 'scheduled refresh did not bypass the recent snapshot');
+  const waiting = await state(f); assert.equal(waiting.operationReports.length, 0); assert.equal(waiting.reportJobs.length, 1);
+  assert.equal(waiting.reportJobs[0].trendJobId, waiting.trendSchedule.lastJobId);
+  release();
+  const completed = await waitUntil(async () => { const s = await state(f); return s.reportJobs[0]?.status === 'completed' ? s : false; }, '09:00 report did not finish');
+  assert.ok(completed.operationReports[0].discoveries.some(discovery => discovery.title === title)); assert.equal(reads, 2);
+});
+
+test('a later report in another timezone refreshes after the Beijing daily snapshot is no longer recent', async t => {
+  let reads = 0;
+  const f = await fixture(t, { trendReader: async () => { reads++; return boards().map(board => ({ ...board,
+    fetchedAt: '2030-01-02T' + (reads === 1 ? '01:00:00.000Z' : '14:00:00.000Z') })); } });
+  await onlyTrendAutomation(f);
+  await f.store.mutate(s => { s.accounts[0].enabled = true; });
+  await f.tick(new Date('2030-01-02T01:00:00.000Z')); const morning = await trendFinished(f, 1), morningJob = morning.trendSchedule.lastJobId;
+  await f.store.mutate(s => {
+    s.trendRefreshJobs.find(job => job.id === morningJob).completedAt = new Date(Date.now() - 16 * 60 * 1000).toISOString();
+    s.accounts[0].reportSettings = { enabled: true, time: '09:00', timezone: 'America/New_York', lastDailyKey: null };
+  });
+  await f.tick(new Date('2030-01-02T14:00:00.000Z'));
+  const complete = await waitUntil(async () => { const s = await state(f); return s.reportJobs[0]?.status === 'completed' ? s : false; }, 'New York report did not finish');
+  assert.equal(reads, 2); assert.equal(complete.trendRefreshJobs.length, 2); assert.notEqual(complete.reportJobs[0].trendJobId, morningJob);
+  const discoveries = complete.operationReports[0].discoveries.filter(item => item.matchId);
+  assert.ok(discoveries.length > 0); assert.ok(discoveries.every(item => item.sources.every(source => source.fetchedAt === '2030-01-02T14:00:00.000Z')));
+});
 
 test('trend refresh preserves real per-platform ranks while merging one topic across boards', async t => {
   let modelCalls = 0;
@@ -118,11 +231,57 @@ test('a failed board refresh retains older real entries and timestamps while mar
   }
 });
 
+test('board normalization preserves fixed failure reasons and old evidence without reflecting source secrets or local paths', async t => {
+  let fail = false;
+  const secret = 'PRIVATE_PROVIDER_TOKEN /Users/private/credentials.env';
+  const f = await fixture(t, { trendReader: async () => fail ? boards().map(board => ({ ...board, status: 'unavailable', items: [],
+    reasonCode: board.platformId === 'weibo' ? 'browser_unavailable' : 'unknown_provider_reason', error: secret })) : boards() });
+  await refresh(f); const before = (await state(f)).trendBoards; fail = true; await refresh(f);
+  const current = await state(f), weibo = current.trendBoards.find(board => board.platformId === 'weibo'), baidu = current.trendBoards.find(board => board.platformId === 'baidu');
+  assert.equal(weibo.reasonCode, 'browser_unavailable'); assert.match(weibo.error, /浏览器|Chrome|读取桥/);
+  assert.equal(baidu.reasonCode, 'source_unavailable'); assert.ok(baidu.error);
+  for (const board of [weibo, baidu]) {
+    const previous = before.find(item => item.platformId === board.platformId);
+    assert.deepEqual(board.items, previous.items); assert.equal(board.fetchedAt, previous.fetchedAt); assert.equal(board.stale, true);
+  }
+  assert.doesNotMatch(JSON.stringify(current.trendBoards), /PRIVATE_PROVIDER_TOKEN|\/Users\/private\/|credentials\.env/);
+});
+
+test('partial boards retain safe explanations and legacy login messages while untrusted source URLs cannot select a misleading reason', async t => {
+  const sources = boards();
+  const f = await fixture(t, { trendReader: async () => [
+    { ...sources[0], status: 'partial', reasonCode: 'board_not_loaded', error: 'PRIVATE_PROVIDER_TOKEN /private/service.log' },
+    { ...sources[1], status: 'needs_login', items: [], error: '官方榜单需要登录后读取' },
+    { platformId: 'zhihu', sourceUrl: 'https://evil.example/forged', status: 'needs_login', reasonCode: 'needs_login', error: '/private/secret' }
+  ] });
+  await refresh(f); const current = (await state(f)).trendBoards;
+  const partial = current.find(board => board.platformId === 'weibo');
+  assert.equal(partial.status, 'partial'); assert.equal(partial.reasonCode, 'board_not_loaded'); assert.ok(partial.error); assert.equal(partial.stale, false);
+  const login = current.find(board => board.platformId === 'baidu'); assert.equal(login.reasonCode, 'needs_login'); assert.match(login.error, /登录/);
+  const invalid = current.find(board => board.platformId === 'zhihu'); assert.equal(invalid.status, 'unavailable'); assert.equal(invalid.reasonCode, 'invalid_source');
+  assert.doesNotMatch(JSON.stringify(current), /PRIVATE_PROVIDER_TOKEN|\/private\//);
+});
+
 test('unavailable boards with no saved entries do not create ranked topics or fabricated heat values', async t => {
   const f = await fixture(t, { trendReader: async () => boards().map(board => ({ ...board, status: 'unavailable', items: [] })) });
   await refresh(f); const s = await state(f);
   assert.ok(s.trendBoards.every(board => board.items.length === 0));
   assert.deepEqual(s.trendMatches[s.defaultAccountId], []);
+});
+
+test('ready or partial sources with no valid items never count as a successful refresh and preserve older snapshots', async t => {
+  let empty = true;
+  const f = await fixture(t, { trendReader: async () => boards().map(board => ({ ...board,
+    status: empty ? board.platformId === 'weibo' ? 'ready' : 'partial' : 'ready', items: empty ? [] : board.items })) });
+  const first = await refresh(f); assert.equal(first.status, 'failed');
+  const blank = await state(f); assert.ok(blank.trendBoards.every(board => board.status === 'unavailable')); assert.deepEqual(blank.trendMatches[blank.defaultAccountId], []);
+  empty = false; await refresh(f); const before = (await state(f)).trendBoards;
+  empty = true; const failed = await refresh(f); assert.equal(failed.status, 'failed');
+  const current = (await state(f)).trendBoards;
+  for (const id of ['weibo', 'baidu']) {
+    const board = current.find(item => item.platformId === id), old = before.find(item => item.platformId === id);
+    assert.equal(board.status, 'unavailable'); assert.equal(board.stale, true); assert.deepEqual(board.items, old.items); assert.equal(board.fetchedAt, old.fetchedAt);
+  }
 });
 
 test('account directions produce distinct explainable rule rankings without rewriting platform heat', async t => {

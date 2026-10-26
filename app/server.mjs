@@ -180,22 +180,26 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
     let job=s.trendRefreshJobs.find(editorialActive);if(job)return job;
     job={id:id(),status:'queued',reason,createdAt:now()};s.trendRefreshJobs.unshift(job);return job;
   }
+  function finishTrendSchedule(s,job){
+    if(s.trendSchedule.lastJobId===job.id)Object.assign(s.trendSchedule,{status:job.status,lastCompletedAt:job.completedAt,lastError:job.error||null});
+  }
   function scheduleTrends(jobId) {
     if(trendPromises.has(jobId))return trendPromises.get(jobId);
     const task=trendQueue.then(async()=>{
       if(closing)return;
-      const started=await store.mutate(s=>{const j=requireItem(s.trendRefreshJobs,jobId);if(j.status!=='queued')return false;j.status='running';j.startedAt=now();return true;});
+      const started=await store.mutate(s=>{const j=requireItem(s.trendRefreshJobs,jobId);if(j.status!=='queued')return false;j.status='running';j.startedAt=now();if(s.trendSchedule.lastJobId===j.id)s.trendSchedule.status='running';return true;});
       if(!started)return;
       try {
         const raw=await readTrends();
         await store.mutate(s=>{
           const j=requireItem(s.trendRefreshJobs,jobId);s.trendBoards=normalizeBoards(raw,s.trendBoards);
-          const available=s.trendBoards.filter(b=>['ready','partial'].includes(b.status)&&!b.stale);
+          const available=s.trendBoards.filter(b=>['ready','partial'].includes(b.status)&&!b.stale&&b.items.length>0);
           j.status=!available.length?'failed':available.length===s.trendBoards.length?'completed':'partial';j.completedAt=now();
           if(!available.length)j.error='没有读到新的可验证榜单，已有快照已保留';
+          finishTrendSchedule(s,j);
           store.event(s,'trends',`热点刷新：${available.length} 个平台可读`);
         });
-      }catch{await store.mutate(s=>{const j=requireItem(s.trendRefreshJobs,jobId);s.trendBoards=normalizeBoards([],s.trendBoards);Object.assign(j,{status:'failed',error:'热点刷新未完成，已有快照已保留',completedAt:now()});});}
+      }catch{await store.mutate(s=>{const j=requireItem(s.trendRefreshJobs,jobId);s.trendBoards=normalizeBoards([],s.trendBoards);Object.assign(j,{status:'failed',error:'热点刷新未完成，已有快照已保留',completedAt:now()});finishTrendSchedule(s,j);});}
     }).catch(error=>console.error('Trend queue failed:',error.name));
     trendQueue=task;trendPromises.set(jobId,task);task.finally(()=>trendPromises.delete(jobId));return task;
   }
@@ -207,8 +211,12 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         const request=await store.mutate(s=>{
           const job=requireItem(s.reportJobs,jobId);if(job.status!=='queued')return null;
           accountById(s,job.accountId);job.status='running';job.startedAt=now();
+          const active=s.trendRefreshJobs.find(editorialActive);
+          if(active){job.trendJobId=active.id;return {trendJobId:active.id};}
+          if(job.trendJobId&&s.trendRefreshJobs.some(j=>j.id===job.trendJobId))return {trendJobId:null};
           const last=s.trendRefreshJobs[0],recent=last?.completedAt&&Date.now()-Date.parse(last.completedAt)<15*60*1000;
-          return {trendJobId:recent?null:queueTrends(s,'report').id};
+          const trendJobId=recent?null:queueTrends(s,'report').id;if(trendJobId)job.trendJobId=trendJobId;
+          return {trendJobId};
         });
         if(!request)return;if(request.trendJobId)await scheduleTrends(request.trendJobId);
         await store.mutate(s=>{
@@ -485,6 +493,12 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   async function tick(date=new Date()) {
     if(ticking)return;ticking=true;
     try {await store.mutate(async s=>{
+      const trend=s.trendSchedule,tp=dateParts(date,trend.timezone),trendKey=dailyKey(date,trend.timezone);
+      let dailyTrendJob=null;
+      if(trend.enabled&&`${tp.hour}:${tp.minute}`>=trend.time&&trend.lastDailyKey!==trendKey){
+        const job=queueTrends(s,'daily');dailyTrendJob=job;
+        Object.assign(trend,{lastDailyKey:trendKey,lastJobId:job.id,lastAttemptAt:date.toISOString(),status:job.status,lastError:null});
+      }
       if(feishuDue(s,date))queueFeishuSync(s,'automatic',date);
       for(const c of s.creators.filter(c=>c.enabled&&!c.archived)){
         const p=dateParts(date,c.timezone),key=dailyKey(date,c.timezone);
@@ -496,7 +510,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
       for(const account of s.accounts.filter(item=>item.enabled&&!item.archived)) {
         const reports=account.reportSettings,rp=dateParts(date,reports.timezone),reportKey=dailyKey(date,reports.timezone);
-        if(reports.enabled&&`${rp.hour}:${rp.minute}`>=reports.time&&reports.lastDailyKey!==reportKey){reports.lastDailyKey=reportKey;queueReport(s,account,reportKey,'daily');}
+        if(reports.enabled&&`${rp.hour}:${rp.minute}`>=reports.time&&reports.lastDailyKey!==reportKey){reports.lastDailyKey=reportKey;const job=queueReport(s,account,reportKey,'daily');if(dailyTrendJob)job.trendJobId=dailyTrendJob.id;}
         const setting=account.settings,p=dateParts(date,setting.timezone),key=dailyKey(date,setting.timezone);
         if(!setting.enabled||`${p.hour}:${p.minute}`<setting.time||account.lastDailyKey===key)continue;
         account.lastDailyKey=key;
@@ -764,7 +778,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);
   app.server.on('error',async e=>{console.error(e.code==='EADDRINUSE'?'端口已占用，请设置 PORT 后重试':e.message);await app.store.close();process.exit(1);});
-  app.server.listen(port,'127.0.0.1',()=>console.log(`RedPilot｜薯航\nLocal: http://localhost:${port}\n运行数据仅保存在本机 runtime/；关闭服务会暂停排期执行。`));
+  app.server.listen(port,'127.0.0.1',()=>{console.log(`RedPilot｜薯航\nLocal: http://localhost:${port}\n运行数据仅保存在本机 runtime/；关闭服务会暂停排期执行。`);app.tick().catch(e=>console.error('Scheduler failed:',e.name));});
   const timer=setInterval(()=>app.tick().catch(e=>console.error('Scheduler failed:',e.name)),15000);timer.unref();
   const shutdown=async()=>{clearInterval(timer);await app.close();process.exit(0);};process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
 }
