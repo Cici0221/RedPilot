@@ -79,14 +79,37 @@ async function waitFor(f, id, status) {
 }
 function noKey(s) { assert.equal(JSON.stringify(s).includes(imageEnv.REDPILOT_IMAGE_API_KEY), false); }
 
-test('image generation requires its own provider configuration instead of using a text-provider key', async t => {
+test('image jobs refuse a main-provider key when the image service differs without leaking credentials', async t => {
   let calls = 0;
-  const f = await fixture(t, { env: { REDPILOT_AI_KEY: 'test-text-key', REDPILOT_AI_MODEL: 'test-text-model' }, fetcher: async () => { calls++; throw Error('must not call'); } });
+  const mainKey = 'test-text-key-never-sent-to-another-service';
+  const f = await fixture(t, { env: { REDPILOT_AI_KEY: mainKey, REDPILOT_AI_MODEL: 'test-text-model', REDPILOT_AI_BASE_URL: 'https://text.example/v1' }, fetcher: async () => { calls++; throw Error('must not call'); } });
   const initial = await state(f);
   assert.equal(initial.imageProvider.ready, false);
+  assert.equal(JSON.stringify(initial).includes(mainKey), false);
   assert.equal((await f.request('image-jobs', generation())).status, 409);
   assert.deepEqual((await state(f)).imageJobs, []);
   assert.equal(calls, 0);
+});
+
+test('same-service main-provider fallback enables image jobs and state without exposing or persisting the key', async t => {
+  const mainKey = 'test-main-key-shared-only-with-same-service';
+  let calls = 0;
+  const f = await fixture(t, { env: { REDPILOT_AI_KEY: mainKey, REDPILOT_AI_MODEL: 'test-text-model', REDPILOT_AI_BASE_URL: 'https://API.OpenAI.com:443/v1/' }, fetcher: async (url, request) => {
+    calls++;
+    assert.equal(url, 'https://api.openai.com/v1/images/generations');
+    assert.equal(request.headers.Authorization, 'Bearer ' + mainKey);
+    assert.equal(JSON.parse(request.body).model, 'gpt-image-2.5-sunburst');
+    return response();
+  } });
+  const initial = await state(f);
+  assert.deepEqual(initial.imageProvider, { ready: true, model: 'gpt-image-2.5-sunburst' });
+  assert.equal(JSON.stringify(initial).includes(mainKey), false);
+  const job = ok(await f.request('image-jobs', generation()));
+  const done = await waitFor(f, job.id, 'completed');
+  assert.equal(calls, 1);
+  assert.equal(JSON.stringify(done.state).includes(mainKey), false);
+  assert.equal(JSON.stringify(f.store.state).includes(mainKey), false);
+  assert.equal(done.state.productAssets.find(a => a.id === done.job.assetId).kind, 'image');
 });
 
 test('generation runs once asynchronously and stores its returned raster image in the managed asset library', async t => {

@@ -19,9 +19,10 @@ const response = bytes => new Response(JSON.stringify({ data: [{ b64_json: bytes
 const run = (fetcher, options = {}, configuration = env) => generateImage(configuration, { request, ...options }, fetcher);
 const failStatus = status => error => error.status === status;
 
-test('image configuration is separate from the text provider and exposes only readiness and model', () => {
+test('image configuration exposes only readiness and its own model, including safe main-provider fallback', () => {
   assert.deepEqual(imageProviderStatus({}), { ready: false, model: 'gpt-image-2.5-sunburst' });
-  assert.deepEqual(imageProviderStatus({ REDPILOT_AI_KEY: 'text-only' }), { ready: false, model: 'gpt-image-2.5-sunburst' });
+  assert.deepEqual(imageProviderStatus({ REDPILOT_AI_KEY: 'text-only', REDPILOT_AI_MODEL: 'text-model' }), { ready: true, model: 'gpt-image-2.5-sunburst' });
+  assert.deepEqual(imageProviderStatus({ REDPILOT_AI_KEY: 'text-only', REDPILOT_AI_BASE_URL: 'https://text.example/v1' }), { ready: false, model: 'gpt-image-2.5-sunburst' });
   assert.deepEqual(imageProviderStatus({ OPENAI_API_KEY: 'test-key', REDPILOT_IMAGE_MODEL: 'custom-image' }), { ready: true, model: 'custom-image' });
   assert.deepEqual(Object.keys(imageProviderStatus(env)).sort(), ['model', 'ready']);
 });
@@ -104,16 +105,57 @@ test('provider accepts validated JPEG and WebP bytes without trusting output nam
   }
 });
 
-test('explicit image key takes precedence and OPENAI_API_KEY is the sole fallback', async () => {
-  for (const [configuration, expected] of [[env, 'fixture-image-key'], [{ OPENAI_API_KEY: 'fixture-openai', REDPILOT_AI_KEY: 'wrong' }, 'fixture-openai']]) {
+test('explicit image credentials retain priority over main-provider fallback, even with different services', async () => {
+  const differentServices = { REDPILOT_IMAGE_BASE_URL: 'https://images.example/v1', REDPILOT_AI_BASE_URL: 'https://text.example/v1' };
+  for (const [configuration, expected] of [
+    [{ ...env, OPENAI_API_KEY: 'fixture-openai', ...differentServices }, 'fixture-image-key'],
+    [{ REDPILOT_IMAGE_API_KEY: ' ', OPENAI_API_KEY: 'fixture-openai', REDPILOT_AI_KEY: 'wrong', ...differentServices }, 'fixture-openai']
+  ]) {
     await run(async (_url, init) => {
       assert.equal(init.headers.Authorization, `Bearer ${expected}`);
       return response(PNG);
     }, {}, configuration);
   }
-  let called = false;
-  await assert.rejects(run(async () => { called = true; }, {}, { REDPILOT_AI_KEY: 'text-only' }), failStatus(409));
-  assert.equal(called, false);
+});
+
+test('main-provider key is reused only for matching normalized service URLs without changing the image model', async () => {
+  for (const configuration of [
+    { REDPILOT_AI_KEY: 'fixture-main-key' },
+    { REDPILOT_AI_KEY: 'fixture-main-key', REDPILOT_IMAGE_API_KEY: ' ', OPENAI_API_KEY: ' ', REDPILOT_AI_MODEL: 'text-model', REDPILOT_AI_BASE_URL: 'https://API.OpenAI.com:443/v1///', REDPILOT_IMAGE_BASE_URL: ' https://api.openai.com/v1/ ' },
+    { REDPILOT_AI_KEY: 'fixture-main-key', REDPILOT_AI_BASE_URL: 'https://shared.example/api/v1/', REDPILOT_IMAGE_BASE_URL: 'https://SHARED.example:443/api/v1', REDPILOT_IMAGE_MODEL: 'custom-image' }
+  ]) {
+    assert.deepEqual(Object.keys(imageProviderStatus(configuration)).sort(), ['model', 'ready']);
+    assert.equal(imageProviderStatus(configuration).ready, true);
+    const result = await run(async (url, init) => {
+      assert.equal(url, configuration.REDPILOT_IMAGE_MODEL ? 'https://shared.example/api/v1/images/generations' : 'https://api.openai.com/v1/images/generations');
+      assert.equal(init.headers.Authorization, 'Bearer fixture-main-key');
+      assert.equal(JSON.parse(init.body).model, configuration.REDPILOT_IMAGE_MODEL || 'gpt-image-2.5-sunburst');
+      return response(PNG);
+    }, {}, configuration);
+    assert.equal(result.model, configuration.REDPILOT_IMAGE_MODEL || 'gpt-image-2.5-sunburst');
+    assert.equal(JSON.stringify(imageProviderStatus(configuration)).includes(configuration.REDPILOT_AI_KEY), false);
+  }
+});
+
+test('main-provider credentials never reach a different or invalid image service and invalid config stays safe to inspect', async () => {
+  const mainKey = 'fixture-main-key-never-cross-services';
+  const bases = [
+    { REDPILOT_IMAGE_BASE_URL: 'https://images.example/v1' },
+    { REDPILOT_AI_BASE_URL: 'https://text.example/v1' },
+    { REDPILOT_AI_BASE_URL: 'https://shared.example/v1', REDPILOT_IMAGE_BASE_URL: 'https://shared.example/v2' },
+    { REDPILOT_AI_BASE_URL: 'https://shared.example/v1', REDPILOT_IMAGE_BASE_URL: 'https://shared.example:8443/v1' },
+    { REDPILOT_AI_BASE_URL: 'https://localhost/v1', REDPILOT_IMAGE_BASE_URL: 'http://localhost/v1' }
+  ];
+  for (const invalid of ['not-url', 'http://images.example/v1', 'http://localhost/v1', 'http://127.0.0.1/v1', 'https://127.0.0.1/v1', 'https://shared.example:8443/v1', 'https://user:password@images.example/v1', 'https://images.example/v1?key=secret', 'https://images.example/v1#fragment', 'https://images.example/v1?', 'https://images.example/v1#', 'https://images.ex\nample/v1']) {
+    bases.push({ REDPILOT_AI_BASE_URL: invalid, REDPILOT_IMAGE_BASE_URL: invalid });
+  }
+  let calls = 0;
+  for (const base of bases) {
+    const configuration = { REDPILOT_AI_KEY: mainKey, ...base };
+    assert.deepEqual(imageProviderStatus(configuration), { ready: false, model: 'gpt-image-2.5-sunburst' });
+    await assert.rejects(run(async () => { calls++; assert.fail('main-provider key was sent to an unapproved service'); }, {}, configuration), error => error.status === 409 && !error.message.includes(mainKey));
+  }
+  assert.equal(calls, 0);
 });
 
 test('custom base URL and model are used, while credential-bearing or insecure addresses are rejected', async () => {

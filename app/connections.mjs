@@ -24,6 +24,24 @@ async function readProbe(response){
   try{for(;;){const {value,done}=await reader.read();if(done)break;size+=value.byteLength;if(size>1048576){await reader.cancel().catch(()=>{});throw new Error('response_limit');}chunks.push(value);}}finally{reader.releaseLock();}
   return JSON.parse(Buffer.concat(chunks,size).toString('utf8'));
 }
+const GENERIC_RATE_ERROR='AI 服务额度或频率受限，请检查项目额度';
+const RATE_ERRORS=Object.freeze({
+  billing_not_active:'OpenAI API 计费未激活，请前往官方账单启用 API 计费（billing_not_active）',
+  credit_balance_exhausted:'OpenAI API 余额不足，请前往官方账单添加余额（credit_balance_exhausted）',
+  project_spend_limit_exceeded:'OpenAI 项目消费限额已达上限，请检查项目消费限额（project_spend_limit_exceeded）',
+  organization_spend_limit_exceeded:'OpenAI 组织消费限额已达上限，请检查组织消费限额（organization_spend_limit_exceeded）',
+  organization_usage_limit_exceeded:'OpenAI 组织用量限额已达上限，请检查组织用量限制（organization_usage_limit_exceeded）',
+  insufficient_quota:'OpenAI API 额度不足，请检查官方账单余额及项目或组织限额（insufficient_quota）',
+  rate_limit_exceeded:'OpenAI API 暂时限流，请稍后重试并降低请求频率（rate_limit_exceeded）',
+  slow_down:'OpenAI API 暂时限流，请稍后重试并降低请求频率（slow_down）'
+});
+async function rateError(response){
+  try{
+    const payload=await readProbe(response);
+    for(const value of [payload?.error?.code,payload?.error?.type])if(typeof value==='string'&&Object.hasOwn(RATE_ERRORS,value))return RATE_ERRORS[value];
+  }catch{}
+  return GENERIC_RATE_ERROR;
+}
 export async function createConnections(directory,env,fetcher=fetch){
   const filename=path.join(directory,'connections.json'),fallback={key:env.REDPILOT_AI_KEY||'',model:env.REDPILOT_AI_MODEL||DEFAULT_TEXT_MODEL,baseUrl:env.REDPILOT_AI_BASE_URL||DEFAULT_BASE};
   let saved={};try{saved=JSON.parse(await readFile(filename,'utf8'));await chmod(filename,0o600);}catch(error){if(error.code!=='ENOENT')throw new Error('服务配置无法读取，已保留原文件');}
@@ -53,7 +71,10 @@ export async function createConnections(directory,env,fetcher=fetch){
         try{
           const base=validateAIBase(c.baseUrl);
           const response=await fetcher(base+'/chat/completions',{method:'POST',redirect:'error',signal:AbortSignal.timeout(20000),headers:{'Content-Type':'application/json',Authorization:'Bearer '+c.key},body:JSON.stringify({model:c.model,store:false,max_completion_tokens:512,response_format:{type:'json_object'},messages:[{role:'system',content:'This is a connection test. Return only JSON. Do not include any credentials.'},{role:'user',content:[{type:'text',text:'Check that you accept the attached tiny image. Reply with exactly this JSON object: {"ok":true}.'},{type:'image_url',image_url:{url:'data:image/png;base64,'+PROBE_IMAGE,detail:'low'}}]}]})});
-          if(!response.ok){await response.body?.cancel().catch(()=>{});error=response.status===401||response.status===403?'API 密钥未通过验证，请检查密钥及项目权限':response.status===429?'AI 服务额度或频率受限，请检查项目额度':response.status===404?'模型或服务地址不可用，请检查配置':`AI 服务返回 HTTP ${response.status}，连接测试未通过`;}
+          if(!response.ok){
+            if(response.status===429)error=await rateError(response);
+            else{await response.body?.cancel().catch(()=>{});error=response.status===401||response.status===403?'API 密钥未通过验证，请检查密钥及项目权限':response.status===404?'模型或服务地址不可用，请检查配置':`AI 服务返回 HTTP ${response.status}，连接测试未通过`;}
+          }
           else{const payload=await readProbe(response);const value=JSON.parse(payload.choices?.[0]?.message?.content||'null');if(value?.ok!==true)error='模型没有返回约定的 JSON，连接测试未通过';}
         }catch{error='AI 连接或图片/JSON 测试未完成，请检查网络、模型和服务地址';}
         return transaction(async()=>{if(version!==revision)throw new InputError('AI 配置已修改，请测试新配置',409);await persist({...saved,aiCheck:{status:error?'failed':'ready',error,checkedAt:now(),configFingerprint:fingerprint(c)}});return publicAI();});

@@ -1,6 +1,8 @@
 import { InputError, str } from './content.mjs';
+import { validateAIBase } from './connections.mjs';
 
 const DEFAULT_MODEL = 'gpt-image-2.5-sunburst';
+const DEFAULT_BASE = 'https://api.openai.com/v1';
 const SIZES = new Set(['1024x1024', '1024x1536', '1536x1024']);
 const RASTER_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -9,11 +11,30 @@ const MAX_RESPONSE_BYTES = MAX_BASE64_LENGTH + 128 * 1024;
 const REQUEST_TIMEOUT_MS = 180000;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
+function serviceBase(value) {
+  if (value !== undefined && (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value))) {
+    throw new InputError('图片服务地址配置不正确', 409);
+  }
+  let base;
+  try { base = new URL(value?.trim() || DEFAULT_BASE); }
+  catch { throw new InputError('图片服务地址配置不正确', 409); }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname);
+  if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && loopback)) || base.username || base.password || base.href.includes('?') || base.href.includes('#')) {
+    throw new InputError('图片服务地址需要使用 HTTPS，且不能包含凭据或查询参数', 409);
+  }
+  return base.href.replace(/\/+$/, '');
+}
+
 function credentials(env) {
-  // Text-provider keys are deliberately separate, including for compatible providers.
-  const key = typeof env.REDPILOT_IMAGE_API_KEY === 'string' && env.REDPILOT_IMAGE_API_KEY.trim()
+  let key = typeof env.REDPILOT_IMAGE_API_KEY === 'string' && env.REDPILOT_IMAGE_API_KEY.trim()
     || typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim()
     || '';
+  // A main-provider key can only be reused for the exact same normalized service.
+  if (!key && typeof env.REDPILOT_AI_KEY === 'string' && env.REDPILOT_AI_KEY.trim()) {
+    try {
+      if (serviceBase(env.REDPILOT_IMAGE_BASE_URL) === validateAIBase(env.REDPILOT_AI_BASE_URL || DEFAULT_BASE)) key = env.REDPILOT_AI_KEY.trim();
+    } catch { /* Invalid service addresses must not enable fallback or break public state. */ }
+  }
   const model = typeof env.REDPILOT_IMAGE_MODEL === 'string' && env.REDPILOT_IMAGE_MODEL.trim() || DEFAULT_MODEL;
   return { key, model };
 }
@@ -53,14 +74,7 @@ export function validateImageRequest(input, assets = []) {
 }
 
 function endpoint(env, mode) {
-  let base;
-  try { base = new URL(env.REDPILOT_IMAGE_BASE_URL || 'https://api.openai.com/v1'); }
-  catch { throw new InputError('图片服务地址配置不正确', 409); }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname);
-  if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && loopback)) || base.username || base.password || base.search || base.hash) {
-    throw new InputError('图片服务地址需要使用 HTTPS，且不能包含凭据或查询参数', 409);
-  }
-  return base.href.replace(/\/+$/, '') + (mode === 'edit' ? '/images/edits' : '/images/generations');
+  return serviceBase(env.REDPILOT_IMAGE_BASE_URL) + (mode === 'edit' ? '/images/edits' : '/images/generations');
 }
 
 function rasterType(bytes) {

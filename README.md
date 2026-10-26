@@ -49,7 +49,7 @@ AI 可在“设置 → AI 连接”私密填写，环境配置仍保留作兼容
 | 功能 | 配置与边界 |
 | --- | --- |
 | AI 截图分析、参考改写 | 在设置页私密保存密钥、模型和服务地址并测试；默认建议 `gpt-6.1-sol`，已核验支持图片输入及 JSON Chat Completions。真实 AI 当前仍未接通；配置与验证成功分别显示。实际创作会向所配服务发送选中参考与产品资料。 |
-| 图片生成、参考图编辑 | 设置 `REDPILOT_IMAGE_API_KEY`，可选图片服务地址和模型。独立于文字 AI 配置，详见下方图片工作台配置；未配置时显示未启用。 |
+| 图片生成、参考图编辑 | 可设置 `REDPILOT_IMAGE_API_KEY`、图片服务地址和模型；图片与文字服务地址一致时，可复用主 AI 密钥。实际生图能力需由图片任务验证。 |
 | 实际小红书发布 | 已实现内置 Chrome 图文驱动与严格账号连接检查，并保留 [外部发布桥 v3](docs/publishing-bridge.md)。当前只实网核验了只读身份链；图片上传、填充与点击发布均未实测，首篇发布尚未验证。 |
 | 每日任务 | 每账号设置时间、IANA 时区、自动/审核模式与图文比例，默认图文70%/文字30%，各账号默认关闭，每天一次。按成功生成数均匀轮换，失败与手动生成不占比；改变比例重新计数，保留历史。服务关闭或电脑休眠时不执行，不补往日内容。 |
 | 飞书资料 | 默认每小时自动同步，可调整为15分钟、6小时或每天；依赖本机 Chrome 登录和文档权限。读取目录/文档可见正文，保留完整度及旧快照，不自动覆盖手工产品事实。 |
@@ -126,7 +126,7 @@ REDPILOT_IMAGE_BASE_URL=https://api.openai.com/v1
 REDPILOT_IMAGE_MODEL=gpt-image-2.5-sunburst
 ```
 
-`REDPILOT_IMAGE_API_KEY` 留空时仅接受 `OPENAI_API_KEY` 作为后备，不会借用文字接口的 `REDPILOT_AI_KEY`。图片密钥只留在服务端；状态接口仅返回是否已配置与模型名称。默认模型依据当前 [OpenAI 图片指南](https://developers.openai.com/api/docs/guides/image-generation) 与 [编辑 API](https://developers.openai.com/api/reference/resources/images/methods/edit) 选择，可自行改为兼容图片 API 的模型。
+`REDPILOT_IMAGE_API_KEY` 留空时优先使用 `OPENAI_API_KEY`；两者均未配置时，只有规范化后的图片服务地址与主 AI 的公网 HTTPS 服务地址完全一致，才复用 `REDPILOT_AI_KEY`。模型仍使用独立的图片模型配置，主 AI 密钥不会发送到另一个图片服务。密钥只留在服务端；状态接口仅返回是否已配置与模型名称，配置完成不代表已经验证真实生图。默认模型依据当前 [OpenAI 图片指南](https://developers.openai.com/api/docs/guides/image-generation) 与 [编辑 API](https://developers.openai.com/api/reference/resources/images/methods/edit) 选择，可自行改为兼容图片 API 的模型。
 
 纯文字生成调用 `/images/generations`；参考图编辑调用 `/images/edits`，仅发送当前选中的 1 至 4 张 PNG、JPEG 或 WebP 图片及本次要求，不会把 SVG、宣传册或模型文件直接发送给图片服务。提示词最多 4000 字符，支持 1024 × 1024、1024 × 1536、1536 × 1024，每次生成一张图。请求有 3 分钟超时，返回图片上限 20MB，校验编码和图片格式；只接收返回的 `b64_json`，不下载服务返回的远程 URL。自定义服务需要支持这两类端点和 base64 结果。未配置密钥时不发起请求；自动化测试使用模拟结果，没有执行付费图片调用。
 

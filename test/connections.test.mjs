@@ -124,6 +124,49 @@ test('authentication and transport failures remain failed and never expose provi
   assert.equal(calls, 2);
 });
 
+test('HTTP 429 classifies only whitelisted error codes or types into specific safe next actions', async t => {
+  let error;
+  const f = await fixture(t, { fetcher: async () => new Response(JSON.stringify({ error }), { status: 429 }) }); await configure(f);
+  const cases = [
+    ['billing_not_active', /计费未激活.*官方账单.*启用/],
+    ['credit_balance_exhausted', /余额不足.*官方账单.*余额/],
+    ['project_spend_limit_exceeded', /项目消费限额/],
+    ['organization_spend_limit_exceeded', /组织消费限额/],
+    ['organization_usage_limit_exceeded', /组织用量限额/],
+    ['insufficient_quota', /额度不足.*账单.*限额/],
+    ['rate_limit_exceeded', /暂时限流.*稍后重试.*降低请求频率/],
+    ['slow_down', /暂时限流.*稍后重试.*降低请求频率/]
+  ];
+  for (const [code, expected] of cases) for (const field of ['code', 'type']) {
+    error = { [field]: code, message: 'NEVER_ECHO_PROVIDER_BODY ' + KEY };
+    const checked = ok(await f.request('connections/ai/test', {}));
+    assert.equal(checked.status, 'failed'); assert.match(checked.error, expected); assert.ok(checked.error.includes(code));
+    assert.doesNotMatch(JSON.stringify(checked), /NEVER_ECHO_PROVIDER_BODY/); noSecrets(checked);
+  }
+  noSecrets(await state(f)); noSecrets(await connections(f));
+});
+
+test('unknown or malformed 429 bodies keep the generic message instead of exposing or guessing from provider text', async t => {
+  let body;
+  const f = await fixture(t, { fetcher: async () => new Response(body, { status: 429 }) }); await configure(f);
+  const cases = ['invalid JSON ' + KEY, JSON.stringify({ error: { code: 'unrecognized', message: 'credit_balance_exhausted ' + KEY } }),
+    JSON.stringify({ error: { code: '__proto__', type: 'toString', message: KEY } }), JSON.stringify({ error: { code: { value: 'slow_down' }, type: 429 } }), JSON.stringify({ error: { code: 'RATE_LIMIT_EXCEEDED' } })];
+  for (body of cases) {
+    const checked = ok(await f.request('connections/ai/test', {}));
+    assert.equal(checked.status, 'failed'); assert.equal(checked.error, 'AI 服务额度或频率受限，请检查项目额度'); noSecrets(checked);
+  }
+});
+
+test('oversized 429 responses use the bounded reader and fall back safely without reflecting body contents', async t => {
+  let cancelled = false;
+  const f = await fixture(t, { fetcher: async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ error: { code: 'credit_balance_exhausted', message: KEY } }))); },
+    cancel() { cancelled = true; }
+  }), { status: 429, headers: { 'Content-Length': String(1024 * 1024 + 1) } }) });
+  await configure(f); const checked = ok(await f.request('connections/ai/test', {}));
+  assert.equal(checked.status, 'failed'); assert.equal(checked.error, 'AI 服务额度或频率受限，请检查项目额度'); assert.equal(cancelled, true); noSecrets(checked);
+});
+
 test('changing environment fallback configuration on restart invalidates the previous successful provider check', async t => {
   let calls = 0;
   const f = await fixture(t, { env: { REDPILOT_AI_KEY: ENV_KEY, REDPILOT_AI_MODEL: 'environment-model-a', REDPILOT_AI_BASE_URL: 'https://api.openai.com/v1' }, fetcher: async () => { calls++; return response({ ok: true }); } });
