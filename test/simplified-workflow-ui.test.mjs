@@ -125,9 +125,25 @@ test('overview and the old report route render one daily workspace',async()=>{
   assert.equal((html.match(/data-page="overview"/g)||[]).length,1);assert.doesNotMatch(html,/data-page="reports"/);
 });
 
-test('legacy storyboard and series remain absent from the editor',()=>{
-  const view=ui();beginEdit(view);const html=view.run('studio()');
-  assert.match(html,/已自动保存/);assert.match(html,/预览并排期/);assert.doesNotMatch(html,/UNIQUE_LEGACY_STORYBOARD|UNIQUE_LEGACY_SERIES|name="series"|data-slide-field|辅助分镜|内容栏目/);
+test('internal source checks, legacy storyboard and series stay out of the editor',async()=>{
+  const view=ui();view.state.drafts[0].gaps=['UNIQUE_INTERNAL_SOURCE_CHECK'];view.context.initial=clone(view.state);view.run('S=initial');beginEdit(view);const html=view.run('studio()');
+  assert.match(html,/已自动保存/);assert.match(html,/预览并排期/);assert.doesNotMatch(html,/UNIQUE_INTERNAL_SOURCE_CHECK|待补资料|补充内容|name="gaps"|UNIQUE_LEGACY_STORYBOARD|UNIQUE_LEGACY_SERIES|name="series"|data-slide-field|辅助分镜|内容栏目/);
+  view.stubRender();view.run("edit.title='修改实际发布的标题';markDraftChanged()");await view.run('flushDraftSave()');
+  assert.deepEqual(view.requests.find(request=>request.method==='PUT').body.gaps,['UNIQUE_INTERNAL_SOURCE_CHECK']);
+});
+
+test('source checks appear only at publication confirmation and carry explicit owner acknowledgement',async()=>{
+  for(const reviewed of [false,true]){
+    const state=fixture();state.drafts[0].gaps=['确认当前产品功能边界'];
+    const view=ui({state,handle:request=>request.url==='/api/drafts/d1/schedule'?response({id:'job'}):undefined});view.stubRender();beginEdit(view);
+    await view.run("schedule('d1')");const html=view.nodes['#modal-content'].innerHTML;
+    assert.match(html,/发布前核对/);assert.match(html,/确认当前产品功能边界/);assert.match(html,/name="reviewGaps" type="checkbox" required/);assert.doesNotMatch(html,/name="gaps"|补充内容/);
+    const form=element({id:'schedule-form',dataset:{id:'d1',account:'official',revision:'1'},values:{scheduledAt:'2026-10-27T19:30',...(reviewed?{reviewGaps:'on'}:{})}});
+    await view.submit(form);assert.equal(view.requests.find(request=>request.url.endsWith('/schedule')).body.reviewGaps,reviewed);
+  }
+  const view=ui();beginEdit(view);assert.equal(view.run('scheduleGapReview(edit)'),'');
+  view.run("edit.gaps=['已核对资料'];edit.gapReview={draftRevision:1,productVersion:1,gaps:['已核对资料']}");assert.equal(view.run('scheduleGapReview(edit)'),'');
+  view.run('edit.revision=2');assert.match(view.run('scheduleGapReview(edit)'),/已核对资料/);
 });
 
 test('only actual draft edits schedule autosave, not an unsent rewrite request',()=>{

@@ -61,3 +61,75 @@ test('rejects unverified or foreign result links',async t=>{const f=await fixtur
 test('daily generation runs once per configured local day, respects review mode',async t=>{let calls=0;const f=await fixture(t,aiEnv,async(url,req)=>{calls++;const payload=JSON.parse(req.body);assert.equal(payload.store,false);assert.ok(payload.messages[1].content.some(x=>x.type==='image_url'));return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({title:'备用号，先聊聊你的需求',body:'SimHelper 正在开发内测。SIM 必须移入设备，设备连接 Wi-Fi，手机需互联网。你最想先测试什么？',tags:['产品开发'],series:'一起打磨',slides:[{headline:'你的备用号在忙什么？',body:'需求征集，开发内测'}],gaps:[],adaptation:'学习问题先行'})}}]}));});await f.request('settings',{enabled:true,mode:'review',time:'10:00',timezone:'Asia/Shanghai'},'PUT');await f.tick(new Date('2026-10-25T02:01:00Z'));await f.tick(new Date('2026-10-25T03:00:00Z'));const s=await getState(f);assert.equal(calls,1);assert.equal(s.drafts.length,2);assert.equal(s.jobs.length,0);assert.equal(s.lastDailyKey,'2026-10-25');assert.equal(s.drafts[0].method,'ai');});
 test('AI analysis validates structured output and does not expose secret config',async t=>{const f=await fixture(t,aiEnv,async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({topic:'问题先行',titlePattern:'生活问句',visual:'深色大字',structure:['从问题到方案'],adaptation:'用自有产品图解',observations:['截图1的大字封面'],inferences:[],unknown:['完整正文']})}}]})));const s=await getState(f);const result=await f.request(`inspirations/${s.inspirations[0].id}/analyze`,{});assert.equal(result.status,200);assert.equal(result.data.method,'ai');assert.deepEqual(result.data.analysis.unknown,['完整正文']);assert.ok(!JSON.stringify(await getState(f)).includes('test-key'));});
 test('invalid settings cannot enable automation and DST uses IANA timezones',async t=>{const f=await fixture(t);const bad=await f.request('settings',{enabled:true,time:'25:70',mode:'automatic',timezone:'moon'} ,'PUT');assert.equal(bad.status,400);assert.equal((await getState(f)).settings.enabled,false);assert.equal(dailyKey(new Date('2026-10-25T01:00:00Z'),'America/Chicago'),'2026-10-24');assert.equal(noteKey(noteUrl+'?xsec_token=abc'),noteKey(noteUrl));});
+
+test('draft gaps require explicit publication review and invalid review inputs leave no approval or job',async t=>{
+  const f=await fixture(t),gap='核对当前设备与手机的联网条件';
+  await f.store.mutate(s=>{s.drafts[0].gaps=[gap];});
+  const d=(await getState(f)).drafts[0],route=`drafts/${d.id}/schedule`,scheduledAt=new Date(Date.now()+3600000).toISOString();
+  const approval=await f.request(`drafts/${d.id}/approve`,{});
+  assert.equal(approval.status,409);assert.match(approval.data.error,/联网条件/);
+  const unreviewed=await f.request(route,{scheduledAt,confirm:true,revision:d.revision});
+  assert.equal(unreviewed.status,409);assert.match(unreviewed.data.error,/联网条件/);
+  for(const input of [{confirm:false,reviewGaps:true},{reviewGaps:true},{confirm:true,reviewGaps:'true'},{confirm:true,reviewGaps:1},{confirm:true,reviewGaps:null}]){
+    const result=await f.request(route,{scheduledAt,revision:d.revision,...input});
+    assert.equal(result.status,400,JSON.stringify(result.data));
+  }
+  const state=await getState(f),saved=state.drafts.find(item=>item.id===d.id);
+  assert.deepEqual(saved.gaps,[gap]);assert.equal(saved.gapReview,undefined);assert.notEqual(saved.approved,true);assert.equal(state.jobs.length,0);
+});
+
+test('publication review preserves original gaps, persists its exact version, and is not inherited by a duplicate',async t=>{
+  const f=await fixture(t),gaps=['核对工程内测阶段','核对联网条件'];
+  await f.store.mutate(s=>{s.drafts[0].gaps=gaps;});
+  const initial=await getState(f),d=initial.drafts[0],scheduledAt=new Date(Date.now()+3600000).toISOString();
+  const scheduled=await f.request(`drafts/${d.id}/schedule`,{scheduledAt,confirm:true,reviewGaps:true,revision:d.revision});
+  assert.equal(scheduled.status,200,JSON.stringify(scheduled.data));
+  const current=await getState(f),saved=current.drafts.find(item=>item.id===d.id);
+  assert.deepEqual(saved.gaps,gaps);assert.equal(saved.gapReview.draftRevision,d.revision);assert.equal(saved.gapReview.productVersion,initial.product.version);
+  assert.deepEqual(saved.gapReview.gaps,gaps);assert.ok(Number.isFinite(Date.parse(saved.gapReview.reviewedAt)));assert.equal(saved.approved,true);
+  assert.deepEqual(current.draftChecks[d.id],[]);
+  const copy=await f.request(`drafts/${d.id}/duplicate`,{});
+  assert.equal(copy.status,200);assert.equal(copy.data.gapReview,undefined);assert.deepEqual(copy.data.gaps,gaps);assert.equal(copy.data.approved,false);
+  const stateWithCopy=await getState(f);assert.ok(stateWithCopy.draftChecks[copy.data.id].includes(gaps[0]));
+  const disk=JSON.parse(await readFile(path.join(f.directory,'state.json'),'utf8'));
+  assert.deepEqual(disk.accountWorkspaces[disk.defaultAccountId].drafts.find(item=>item.id===d.id).gapReview,saved.gapReview);
+  const {createStore}=await import('../app/store.mjs');await f.store.close();const reopened=await createStore(root,f.directory);
+  assert.deepEqual(reopened.state.drafts.find(item=>item.id===d.id).gapReview,saved.gapReview);await reopened.close();
+});
+
+test('draft edits, image changes, product changes, and changed gap text invalidate earlier publication review',async t=>{
+  for(const change of ['body','image','product','gap'])await t.test(change,async t=>{
+    const f=await fixture(t),gap='核对当前产品条件';
+    await f.store.mutate(s=>{s.drafts[0].gaps=[gap];});
+    let state=await getState(f),d=state.drafts[0];
+    const route=`drafts/${d.id}/schedule`,input={scheduledAt:new Date(Date.now()+3600000).toISOString(),confirm:true,reviewGaps:true,revision:d.revision};
+    const job=await f.request(route,input);assert.equal(job.status,200,JSON.stringify(job.data));
+    assert.equal((await f.request(`jobs/${job.data.id}/cancel`,{})).status,200);
+    state=await getState(f);d=state.drafts.find(item=>item.id===d.id);
+    if(change==='product'){
+      assert.equal((await f.request('product',{...state.product,summary:state.product.summary+' 最新核对资料'},'PUT')).status,200);
+    }else if(change==='gap'){
+      await f.store.mutate(s=>{s.drafts.find(item=>item.id===d.id).gaps=['新的待核对条件'];});
+    }else {
+      const updated={...d,...(change==='body'?{body:d.body+' 使用前核对网络。'}:{productAssetIds:[]})};
+      const edit=await f.request(`drafts/${d.id}`,updated,'PUT');assert.equal(edit.status,200,JSON.stringify(edit.data));
+    }
+    const changed=await getState(f),current=changed.drafts.find(item=>item.id===d.id);
+    assert.ok(changed.draftChecks[d.id].some(issue=>issue===gap||issue==='新的待核对条件'));
+    const stale=await f.request(route,{...input,revision:current.revision,reviewGaps:false});assert.equal(stale.status,409);
+    const finalState=await getState(f);assert.equal(finalState.jobs.filter(item=>item.status==='scheduled').length,0);
+  });
+});
+
+test('stale review and factual publishing failures roll back review records and owner approval together',async t=>{
+  const f=await fixture(t),gap='核对产品资料';
+  await f.store.mutate(s=>{s.drafts[0].gaps=[gap];});
+  const initial=await getState(f),d=initial.drafts[0],route=`drafts/${d.id}/schedule`,scheduledAt=new Date(Date.now()+3600000).toISOString();
+  const saved=await f.request(`drafts/${d.id}`,{...d,title:'这是一个超过二十个字的测试标题需要精简后才能发布'},'PUT');assert.equal(saved.status,200);
+  const stale=await f.request(route,{scheduledAt,confirm:true,reviewGaps:true,revision:d.revision});assert.equal(stale.status,409);
+  const invalid=await f.request(route,{scheduledAt,confirm:true,reviewGaps:true,revision:saved.data.revision});
+  assert.equal(invalid.status,409);assert.match(invalid.data.error,/标题超过 20 字/);
+  const state=await getState(f),current=state.drafts.find(item=>item.id===d.id);
+  assert.equal(current.gapReview,undefined);assert.equal(current.approved,false);assert.deepEqual(current.gaps,[gap]);assert.equal(state.jobs.length,0);
+  const noAck=await f.request(`drafts/${d.id}/approve`,{});assert.equal(noAck.status,409);assert.match(noAck.data.error,/核对产品资料/);
+});

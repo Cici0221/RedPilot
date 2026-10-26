@@ -519,11 +519,15 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 .home-drafts>.draft-row{background:var(--paper);border:1px solid var(--line);border-radius:12px;margin-top:10px}
 .reference-auto{margin:14px 0 4px;font-size:var(--type-control);color:var(--muted)}
 .reference-auto input{accent-color:var(--accent)}
-.draft-gaps,.draft-rewrite{border-top:1px solid var(--line);padding:16px 0;margin-top:12px}
-.draft-gaps>summary,.draft-rewrite>summary{font-size:var(--type-body);font-weight:500;cursor:pointer;color:var(--ink)}
-.draft-gaps[open]>summary,.draft-rewrite[open]>summary{margin-bottom:14px}
+.draft-rewrite{border-top:1px solid var(--line);padding:16px 0;margin-top:12px}
+.draft-rewrite>summary{font-size:var(--type-body);font-weight:500;cursor:pointer;color:var(--ink)}
+.draft-rewrite[open]>summary{margin-bottom:14px}
 .draft-save-actions{position:sticky;bottom:0;padding-top:18px;padding-bottom:8px;background:var(--paper);border-top:1px solid var(--line)}
-.save-state.is-error,.schedule-error{color:var(--error-text);overflow-wrap:anywhere}
+.save-state.is-error,.schedule-review{padding:18px 0;margin-bottom:18px;border-bottom:1px solid var(--line)}
+.schedule-review h3{font-size:var(--type-body);margin:0 0 12px}
+.schedule-review ul{margin:0 0 16px;padding-left:22px;color:var(--muted);font-size:var(--type-body);line-height:1.65;overflow-wrap:anywhere}
+.schedule-review li+li{margin-top:8px}
+.schedule-error{color:var(--error-text);overflow-wrap:anywhere}
 .schedule-preview{padding:18px 0;margin-bottom:18px;border-bottom:1px solid var(--line)}
 .schedule-preview h3{font-size:var(--type-card);margin:0 0 14px}
 .schedule-preview>p{font-size:var(--type-body);line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;color:var(--ink)}
@@ -703,7 +707,7 @@ button.report-metric:focus-visible{outline:3px solid #007aff40;outline-offset:3p
 .studio-compose #draft-form>.field-footer{margin:0 0 20px}
 .studio-compose #body{min-height:320px;line-height:1.85;resize:vertical}
 .studio-compose #title{font-size:18px;font-weight:550}
-.studio-compose #draft-form>.draft-rewrite,.studio-compose .draft-gaps,.studio-compose .preview-reference{margin:16px 0 0;padding:12px 0;border-top:1px solid var(--line)}
+.studio-compose #draft-form>.draft-rewrite,.studio-compose .preview-reference{margin:16px 0 0;padding:12px 0;border-top:1px solid var(--line)}
 .studio-compose summary{color:var(--muted);font-size:14px;cursor:pointer}
 .studio-compose .draft-save-actions{position:static;margin-top:20px;background:#fff;padding:20px 0 0;gap:14px}
 .studio-compose .draft-save-actions .save-state{font-size:13px}

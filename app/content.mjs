@@ -89,7 +89,11 @@ export function checks(d, product, assets = []) {
     if (selected.some(asset => imageRole(asset, assets) === 'test')) problems.push('测试图片不能用于发布，请更换产品成品图');
     if (selected.some(asset => imageRole(asset, assets) === 'modelPreview')) problems.push('3D 模型预览图不能直接发布，请先制作成品配图');
   }
-  if (d.gaps?.length) problems.push(...d.gaps);
+  const review=d.gapReview;
+  const reviewed=Number.isInteger(d.revision)&&d.revision>0&&review?.draftRevision===d.revision&&
+    review.productVersion===product.version&&Array.isArray(review.gaps)&&
+    review.gaps.length===(d.gaps||[]).length&&review.gaps.every((gap,index)=>gap===d.gaps[index]);
+  if (d.gaps?.length&&!reviewed) problems.push(...d.gaps);
   // Only the title and body are published copy. Legacy storyboard notes stay
   // readable in saved drafts but cannot add promises or satisfy disclosures.
   const text = `${d.title}\n${d.body}`;

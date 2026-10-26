@@ -912,12 +912,23 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           }
           m=pathname.match(/^\/api\/drafts\/([^/]+)(?:\/(approve|schedule|duplicate))?$/);
           if(m){const d=requireItem(s.drafts,m[1]);
-            if(m[2]==='duplicate'&&req.method==='POST'){const target=accountById(s,b.accountId||(accountById(s,d.accountId,true).archived?s.defaultAccountId:d.accountId));const copy={...structuredClone(d),accountId:target.id,id:id(),status:'draft',approved:false,history:[],revision:1,createdAt:now(),updatedAt:now()};s.drafts.unshift(copy);return copy;}
+            if(m[2]==='duplicate'&&req.method==='POST'){const target=accountById(s,b.accountId||(accountById(s,d.accountId,true).archived?s.defaultAccountId:d.accountId));const copy={...structuredClone(d),accountId:target.id,id:id(),status:'draft',approved:false,history:[],revision:1,createdAt:now(),updatedAt:now()};delete copy.gapReview;s.drafts.unshift(copy);return copy;}
             if(s.jobs.some(j=>j.draftId===d.id&&!['cancelled','failed'].includes(j.status)))throw new InputError('请先取消排期；已发布或待核对的稿件可复制为新草稿',409);
             if(req.method==='DELETE'){s.drafts=s.drafts.filter(x=>x.id!==d.id);return {ok:true};}
             if(req.method==='PUT'){checkDraftRevision(d,b);const account=accountById(s,b.accountId||d.accountId),validated=validateDraft({...b,contentMode:b.contentMode??d.contentMode});const data={...validated,productAssetIds:validated.contentMode==='text'?[]:selectedProductAssets(s,b.productAssetIds??d.productAssetIds??[]).map(a=>a.id),accountId:account.id};d.history.unshift({at:d.updatedAt,title:d.title,body:d.body,slides:d.slides,tags:d.tags,contentMode:d.contentMode,productAssetIds:d.productAssetIds});d.history=d.history.slice(0,20);Object.assign(d,data,{productVersion:s.product.version,approved:false,revision:d.revision+1,updatedAt:now()});return d;}
             if(m[2]==='approve'&&req.method==='POST'){const issues=checks(d,s.product,s.productAssets);if(issues.length)throw new InputError(issues.join('；'),409);d.approved=true;d.approvalKind='owner';return d;}
-            if(m[2]==='schedule'&&req.method==='POST'){const at=new Date(b.scheduledAt);if(!Number.isFinite(at.valueOf())||at<=new Date())throw new InputError('请选择未来的发布时间');if(b.confirm!==undefined&&typeof b.confirm!=='boolean')throw new InputError('确认排期选项不正确');checkDraftRevision(d,b,{required:b.confirm===true});if(b.confirm===true){d.approved=true;d.approvalKind='owner';}return newJob(s,d,at.toISOString(),b.accountId||d.accountId);}
+            if(m[2]==='schedule'&&req.method==='POST'){
+              const at=new Date(b.scheduledAt);if(!Number.isFinite(at.valueOf())||at<=new Date())throw new InputError('请选择未来的发布时间');
+              if(b.confirm!==undefined&&typeof b.confirm!=='boolean')throw new InputError('确认排期选项不正确');
+              if(b.reviewGaps!==undefined&&typeof b.reviewGaps!=='boolean')throw new InputError('资料核对选项不正确');
+              if(b.reviewGaps===true&&b.confirm!==true)throw new InputError('请在确认排期时核对资料');
+              checkDraftRevision(d,b,{required:b.confirm===true});
+              if(b.confirm===true){
+                if(b.reviewGaps===true)d.gapReview={draftRevision:d.revision,productVersion:s.product.version,gaps:[...(d.gaps||[])],reviewedAt:now()};
+                d.approved=true;d.approvalKind='owner';
+              }
+              return newJob(s,d,at.toISOString(),b.accountId||d.accountId);
+            }
           }
           m=pathname.match(/^\/api\/jobs\/([^/]+)\/(cancel|retry|verify)$/);
           if(m&&req.method==='POST'){const j=requireItem(s.jobs,m[1]);
