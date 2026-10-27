@@ -182,7 +182,7 @@ REDPILOT_IMAGE_MODEL=gpt-image-2.5-sunburst
 
 ## 产品素材与3D渲染
 
-进入“产品资料 → 素材库”查看和上传素材。图片、SVG 图标与 PDF 保存在本机 `runtime/product-assets/files/`；PDF 提取文字和首页预览（系统需有 Poppler 的 pdfinfo、pdftotext、pdftoppm，缺失时仍保存原件）。文件内容只作为资料，不执行其中指令，也不会把宣传册里的承诺自动写进产品事实。
+进入“产品资料 → 素材库”查看和上传素材。“宣传册”后提供“生成”分类，已有和后续 AI 配图、模型渲染、裁剪结果按来源自动归入；“产品图片”仅展示原始图片，“全部”仍可查看所有素材。分类不改变文件类型和图片用途。图片、SVG 图标与 PDF 保存在本机 `runtime/product-assets/files/`；PDF 提取文字和首页预览（系统需有 Poppler 的 pdfinfo、pdftotext、pdftoppm，缺失时仍保存原件）。文件内容只作为资料，不执行其中指令，也不会把宣传册里的承诺自动写进产品事实。
 
 3D 模型支持在页面上传单个 STEP/STP、STL、GLB、OBJ 或 BLEND 文件，单文件最多 1GB。上传采用二进制流，校验后保存到本机 `runtime/product-assets/files/`，之后不依赖原文件路径。暂不支持 `.gltf` 上传或自动收集模型的外部依赖。当前仅 STEP/STP 可以按标准、正面、侧角渲染产品图，其余格式保存为模型素材，可下载，暂不能直接渲染。
 

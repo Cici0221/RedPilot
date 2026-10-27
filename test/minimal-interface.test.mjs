@@ -92,6 +92,21 @@ test('product editing omits internal rule fields and saving visible copy preserv
   assert.deepEqual(saved.body.conditions,['内部事实前提']);assert.deepEqual(saved.body.restrictions,['内部事实边界']);
 });
 
+test('generated assets have a separate library category after brochures without changing original image roles',()=>{
+  const state=fixture(),asset=(id,kind='image',metadata={})=>({id,name:id,originalName:id+'.png',kind,mime:kind==='image'?'image/png':'application/octet-stream',size:100,fileUrl:'/api/product-assets/'+id+'/file',metadata});
+  state.productAssets=[asset('AI-named-original'),asset('cad','model'),asset('logo','icon'),asset('brochure','brochure'),asset('ai-output','image',{aiGenerated:true}),asset('render-output','image',{modelAssetId:'cad',previewOnly:true}),asset('cropped-output','image',{adjustedFromAssetId:'AI-named-original'}),asset('legacy-ai'),asset('legacy-render'),asset('test-output','image',{aiGenerated:true,testOnly:true})];
+  state.imageJobs=[{id:'old-ai-job',status:'completed',assetId:'legacy-ai'}];state.productRenders=[{id:'old-render-job',status:'completed',assetId:'cad',imageAssetId:'legacy-render'}];
+  const original=clone(state.productAssets),view=ui(state);view.run("page='product';productTab='assets';assetFilter='generated'");
+  const generated=view.run('assetLibrary()'),filters=elements(generated,'button').filter(button=>button['data-action']==='asset-filter');
+  assert.deepEqual(filters.map(button=>button['data-kind']),['all','model','icon','image','brochure','generated']);
+  assert.match(generated,/生成 <span>6<\/span>/);assert.match(generated,/产品图片 <span>1<\/span>/);assert.match(generated,/6 项/);
+  const generatedCards=elements(generated,'button').filter(button=>button['data-action']==='asset-preview').map(button=>button['data-id']);
+  assert.deepEqual(generatedCards,['ai-output','render-output','cropped-output','legacy-ai','legacy-render','test-output']);
+  view.run("assetFilter='image'");const photos=view.run('assetLibrary()');assert.deepEqual(elements(photos,'button').filter(button=>button['data-action']==='asset-preview').map(button=>button['data-id']),['AI-named-original']);
+  view.run("assetFilter='all'");assert.equal(elements(view.run('assetLibrary()'),'button').filter(button=>button['data-action']==='asset-preview').length,10);
+  assert.equal(view.run("publishableImageAsset(productAsset('test-output'))"),false);assert.equal(view.run("publishableImageAsset(productAsset('render-output'))"),false);assert.deepEqual(state.productAssets,original);
+});
+
 test('home omits stored sync notices and housekeeping plans while retaining publication work and matching counts',()=>{
   const state=fixture(),report=state.operationReports[0];
   report.status='partial';report.issues=['共用产品资料同步尚未完整完成，旧快照不会被当作新实测依据'];
