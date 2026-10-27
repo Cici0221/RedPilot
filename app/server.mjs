@@ -10,6 +10,8 @@ import { createStore } from './store.mjs';
 import { createAuth } from './auth.mjs';
 import { createConnections } from './connections.mjs';
 import { createXhsPublisher } from './xhs-publisher.mjs';
+import { createFeishuNotifications } from './feishu-notifications.mjs';
+import { createLoginMonitor, publisherProfileId } from './login-monitor.mjs';
 import { imageProviderStatus, validateImageRequest, generateImage } from './image-workbench.mjs';
 import { queueDraftImages, settleDraftImageBatch, adoptDraftImage } from './draft-images.mjs';
 import { receiveModelUpload, saveModelUpload, cleanModelUpload } from './model-uploads.mjs';
@@ -46,12 +48,13 @@ function validateFile(f) {
   else throw new InputError('仅支持 PNG、JPEG 和 WebP 图片');
   return {name,buf,ext,hash:createHash('sha256').update(buf).digest('hex')};
 }
-export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,creatorReader,trendReader,feishuReader,xhsPublisher,authClock}={}) {
+export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_DIR || path.join(root,'runtime'),env=process.env,fetcher=fetch,renderRunner,linkReader,creatorReader,trendReader,feishuReader,xhsPublisher,notifications,loginMonitorClock,authClock}={}) {
   env={...env};
   const connections=await createConnections(directory,env,fetcher);
   const auth=await createAuth({directory,clock:authClock,secureCookies:env.REDPILOT_COOKIE_SECURE==='true'});
   const store=await createStore(root,directory,{legacyBridgeAccountId:env.REDPILOT_ACCOUNT_ID || ''});
   const nativePublisher=xhsPublisher||await createXhsPublisher({directory,env});
+  const feishuNotifications=notifications||await createFeishuNotifications(directory,env,fetcher);
   const bridgeReady=()=>Boolean(env.REDPILOT_PUBLISH_URL&&env.REDPILOT_PUBLISH_TOKEN);
   const nativeReady=account=>account.publisherDriver==='chrome'&&account.publisherConnection?.status==='ready'&&Boolean(account.bridgeAccountId);
   const capabilities=()=>({ai:aiReady(env),model:env.REDPILOT_AI_MODEL||null,publisher:bridgeReady()||store.state.accounts.some(nativeReady),textPublisher:bridgeReady()&&env.REDPILOT_PUBLISH_TEXT_ENABLED==='true',
@@ -77,6 +80,32 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   await store.mutate(s=>{for(const batchId of new Set(s.imageJobs.filter(job=>job.draftId&&job.batchId).map(job=>job.batchId)))settleDraftImageBatch(s,batchId);});
   }
   for(const accountId of store.accountIds())await store.run(accountId,initializeWorkspace);
+  const loginMonitor=createLoginMonitor({store,checkAccount:(accountId,{date})=>checkPublisherAccount(accountId,{date}),notifier:feishuNotifications,clock:loginMonitorClock});
+  await loginMonitor.initialize();
+  async function checkPublisherAccount(accountId,{bind=false,date=new Date()}={}){
+    const snapshot=structuredClone(accountById(store.state,accountId)),profileId=publisherProfileId(snapshot);
+    if(!profileId)throw new InputError('请先填写这个账号的小红书主页链接');
+    if(!bind&&(snapshot.publisherDriver!=='chrome'||snapshot.bridgeAccountId!==profileId))throw new InputError('发布账号连接已变化，请重新检查登录',409);
+    const result=await nativePublisher.checkConnection(profileId);
+    const status=['ready','needs_login','mismatch','unsupported','unavailable'].includes(result?.status)?result.status:'unavailable';
+    const value={status,accountId:typeof result?.accountId==='string'?result.accountId:null,handle:typeof result?.handle==='string'?result.handle.slice(0,100):null,checkedAt:date.toISOString(),image:result?.image===true,text:false,error:typeof result?.error==='string'?result.error.slice(0,500):null,loginUrl:'https://creator.xiaohongshu.com/'};
+    if(status==='ready'&&value.accountId!==profileId)Object.assign(value,{status:'mismatch',error:'登录账号与所选账号主页不一致，未绑定发布目标'});
+    return store.mutate(s=>{
+      const account=accountById(s,snapshot.id);
+      if(account.profileUrl!==snapshot.profileUrl||account.bridgeAccountId!==snapshot.bridgeAccountId||(!bind&&(!account.enabled||account.publisherDriver!=='chrome')))throw new InputError('账号资料已变化，请重新检查登录',409);
+      if(bind&&value.status==='ready'){
+        if(account.publisherDriver!=='chrome'&&s.jobs.some(j=>j.accountId===account.id&&['scheduled','blocked','publishing','uncertain'].includes(j.status)))throw new InputError('请先处理现有发布任务，再切换发布方式',409);
+        updateAccount(s,account.id,{bridgeAccountId:value.accountId});account.publisherDriver='chrome';
+      }
+      const previous=account.publisherConnection,publishVerified=previous?.accountId===profileId&&previous.publishVerified===true;
+      // A failed login check does not undo the verified publication history or bind a different Chrome identity.
+      account.publisherConnection={...value,accountId:value.status!=='ready'&&publishVerified?profileId:value.accountId,publishVerified,
+        ...(previous?.lastPublishedAt?{lastPublishedAt:previous.lastPublishedAt}:{}),
+        ...(value.status==='mismatch'&&value.accountId?{observedAccountId:value.accountId}:{})};
+      if(value.status==='ready'&&account.loginMonitor)Object.assign(account.loginMonitor,{status:'ready',checkedAt:date.toISOString(),error:null,outage:null});
+      return account.publisherConnection;
+    });
+  }
   function scopedReference(s,referenceId,accountId){
     if(!referenceId)return null;
     const reference=requireItem(s.inspirations,referenceId);
@@ -666,7 +695,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       }
     }).catch(error=>console.error('Render queue failed:',error.name));
   }
-  const connectionState=()=>({ai:connections.publicAI(),publisher:{configured:bridgeReady()||store.state.accounts.some(nativeReady),nativeAvailable:true,status:store.state.accounts.some(nativeReady)?'ready':bridgeReady()?'untested':'unconfigured'},accounts:Object.fromEntries(store.state.accounts.map(a=>[a.id,a.publisherConnection||{status:'unconfigured',checkedAt:null,error:null}]))});
+  const connectionState=()=>({ai:connections.publicAI(),feishuNotifications:feishuNotifications.publicStatus(),publisher:{configured:bridgeReady()||store.state.accounts.some(nativeReady),nativeAvailable:true,status:store.state.accounts.some(nativeReady)?'ready':bridgeReady()?'untested':'unconfigured'},accounts:Object.fromEntries(store.state.accounts.map(a=>[a.id,a.publisherConnection||{status:'unconfigured',checkedAt:null,error:null}]))});
   const publicState=()=>({...store.state,connections:connectionState(),trendMatches:{[store.state.workspaceAccountId]:rankedTrends(store.state,accountById(store.state))},imageProvider:imageProviderStatus(env),productAssets:store.state.productAssets.map(a=>publicAsset(a,store.state)),
     capabilities:capabilities(),draftChecks:Object.fromEntries(store.state.drafts.map(d=>[d.id,checks(d,store.state.product,store.state.productAssets)]))});
   let ticking=false;
@@ -714,7 +743,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   }
   async function tick(date=new Date()){
     if(ticking)return;ticking=true;
-    try{for(const accountId of store.accountIds())if(!store.rootState.accounts.find(account=>account.id===accountId)?.archived)await store.run(accountId,()=>tickWorkspace(date));}
+    try{await loginMonitor.tick(date);for(const accountId of store.accountIds())if(!store.rootState.accounts.find(account=>account.id===accountId)?.archived)await store.run(accountId,()=>tickWorkspace(date));}
     finally{ticking=false;}
   }
   const server=http.createServer(async(req,res)=>{
@@ -750,6 +779,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       if(pathname.startsWith('/api/')) {
         if(req.method==='GET'&&pathname==='/api/state')return json(res,publicState());
         if(req.method==='GET'&&pathname==='/api/connections')return json(res,connectionState());
+        if(req.method==='GET'&&pathname==='/api/notifications/feishu')return json(res,feishuNotifications.publicStatus());
         if(req.method==='GET'&&pathname==='/api/health')return json(res,{ok:true});
         const media=pathname.match(/^\/api\/product-assets\/([^/]+)\/(file|preview)$/);
         if(media&&['GET','HEAD'].includes(req.method)) {
@@ -785,6 +815,9 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
           } finally {if(upload)await cleanModelUpload(upload,directory,{productAssets:store.accountIds().flatMap(accountId=>store.run(accountId,()=>store.state.productAssets))},committed);}
         }
         const b=await body(req);
+        if(req.method==='PUT'&&pathname==='/api/notifications/feishu')return json(res,await feishuNotifications.configure(b));
+        // Only this explicit user action sends a test message; saving credentials does not send one.
+        if(req.method==='POST'&&pathname==='/api/notifications/feishu/test')return json(res,await feishuNotifications.send('薯航｜飞书提醒测试\n这是一条由你点击“发送测试”触发的测试消息。每天北京时间 08:00 检查小红书账号登录，掉线时会在这里提醒。'));
         if(!management&&b.accountId){accountById(store.state,b.accountId);if(b.accountId!==store.state.workspaceAccountId)throw new InputError('目标属于其他账号，请先切换账号',409);}
         const legacyDiscussionDraft=pathname.match(/^\/api\/discussions\/([^/]+)\/draft$/);
         if(req.method==='POST'&&(pathname==='/api/draft-generations'||pathname==='/api/drafts'||legacyDiscussionDraft)){
@@ -803,22 +836,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
         if(req.method==='POST'&&pathname==='/api/connections/ai/test')return json(res,await connections.test());
         const connectPublisherRoute=pathname.match(/^\/api\/accounts\/([^/]+)\/connect-publisher$/);
         if(req.method==='POST'&&connectPublisherRoute){
-          const snapshot=accountById(store.state,connectPublisherRoute[1]),profileId=String(snapshot.profileUrl||'').match(/^https:\/\/(?:www\.)?xiaohongshu\.com\/user\/profile\/([a-f\d]{24})(?:[/?#]|$)/i)?.[1]?.toLowerCase();
-          if(!profileId)throw new InputError('请先填写这个账号的小红书主页链接');
-          const originalProfile=snapshot.profileUrl,originalMapping=snapshot.bridgeAccountId;
-          const result=await nativePublisher.checkConnection(profileId);
-          const status=['ready','needs_login','mismatch','unsupported','unavailable'].includes(result?.status)?result.status:'unavailable';
-          const value={status,accountId:typeof result?.accountId==='string'?result.accountId:null,handle:typeof result?.handle==='string'?result.handle.slice(0,100):null,checkedAt:now(),image:result?.image===true,text:false,error:typeof result?.error==='string'?result.error.slice(0,500):null,loginUrl:'https://creator.xiaohongshu.com/'};
-          if(status==='ready'&&value.accountId!==profileId)Object.assign(value,{status:'mismatch',error:'登录账号与所选账号主页不一致，未绑定发布目标'});
-          return json(res,await store.mutate(s=>{
-            const account=accountById(s,snapshot.id);if(account.profileUrl!==originalProfile||account.bridgeAccountId!==originalMapping)throw new InputError('账号资料已变化，请重新检查登录',409);
-            if(value.status==='ready'){
-              if(account.publisherDriver!=='chrome'&&s.jobs.some(j=>j.accountId===account.id&&['scheduled','blocked','publishing','uncertain'].includes(j.status)))throw new InputError('请先处理现有发布任务，再切换发布方式',409);
-              updateAccount(s,account.id,{bridgeAccountId:value.accountId});account.publisherDriver='chrome';
-            }
-            const publishVerified=account.publisherConnection?.accountId===value.accountId&&account.publisherConnection?.publishVerified===true;
-            account.publisherConnection={...value,publishVerified};return account.publisherConnection;
-          }));
+          return json(res,await checkPublisherAccount(connectPublisherRoute[1],{bind:true}));
         }
         const messageRoute=pathname.match(/^\/api\/discussions\/([^/]+)\/messages$/);
         if(req.method==='POST'&&messageRoute){
@@ -986,7 +1004,7 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       });
     }catch(err){if(!res.headersSent)json(res,{error:err.status?err.message:err.code==='ENOENT'?'文件不存在':'操作未完成，请检查本地服务日志'},err.status|| (err.code==='ENOENT'?404:500));else res.end();if(!err.status&&err.code!=='ENOENT')console.error('RedPilot request failed:',err.name);}
   });
-  return {server,store,tick, async close(){closing=true;await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue,nativeQueue,draftGenerationQueue]);await new Promise(resolve=>server.close(resolve));await auth.close();await connections.close();await nativePublisher.close?.();await store.close();}};
+  return {server,store,tick,loginMonitor,notifications:feishuNotifications, async close(){closing=true;await loginMonitor.close();await Promise.all([renderQueue,imageQueue,creatorQueue,readerQueue,analysisQueue,reportQueue,trendQueue,feishuQueue,nativeQueue,draftGenerationQueue]);await new Promise(resolve=>server.close(resolve));await auth.close();await connections.close();await nativePublisher.close?.();await feishuNotifications.close?.();await store.close();}};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const app=await createApp();const port=Number(process.env.PORT||4317);
