@@ -899,5 +899,13 @@ button.report-metric:focus-visible{outline:3px solid #007aff40;outline-offset:3p
 .workspace-account-commands{display:grid;border-top:1px solid #edf0f5;margin-top:5px;padding-top:5px}
 .workspace-account-commands>.btn{justify-content:flex-start;text-align:left;padding:10px 12px;color:#374151}
 .workspace-account-commands>.btn svg{width:18px;height:18px}
+.account-modal-publisher{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-top:23px;padding-top:21px;border-top:1px solid var(--line)}
+.account-modal-publisher>div{min-width:0;flex:1}
+.account-modal-publisher>.btn{flex:none;font-size:15px;white-space:nowrap}
+.account-modal-publisher .publisher-status-top{margin:0;gap:8px}
+.account-modal-publisher .connection-error,.account-modal-publisher .publisher-login-note{margin-top:10px;font-size:14px;line-height:1.6}
+#account-form #account-notes{min-height:76px}
+.account-modal-actions>.btn.ghost{color:var(--muted);padding-left:0}
+@media(max-width:600px){.account-modal-publisher{flex-wrap:wrap;gap:14px}.account-modal-publisher>div{flex-basis:100%}.account-modal-publisher>.btn{font-size:14px}.account-modal-actions{gap:10px}}
 @media(max-width:760px){.sidebar-auth{position:absolute;top:13px;right:16px;padding-top:0;max-width:180px}.workspace-account-menu>summary{min-height:42px;padding:5px 8px}.workspace-account-name{font-size:14px}.workspace-account-popover{bottom:auto;top:calc(100% + 8px);left:auto;right:0;width:240px}.workspace-avatar{width:28px;height:28px}.brand{padding-right:180px}}
 @media(max-width:440px){.sidebar-auth{max-width:144px}.workspace-account-name{max-width:78px}.brand{padding-right:142px}.workspace-menu-chevron{display:none}}

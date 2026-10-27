@@ -7,7 +7,7 @@ const source=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
 const definitions=source.slice(0,source.indexOf("document.addEventListener('click'"));
 const listeners=source.slice(source.indexOf("document.addEventListener('click'"),source.indexOf("window.addEventListener('pageshow'"));
 const clone=value=>structuredClone(value);
-const reply=value=>({ok:true,status:200,json:async()=>clone(value)});
+const reply=(value,status=200)=>({ok:status>=200&&status<300,status,json:async()=>clone(value)});
 const decode=value=>value.replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
 const attributes=html=>Object.fromEntries([...html.matchAll(/([\w-]+)="([^"]*)"/g)].map(([,name,value])=>[name,decode(value)]));
 const elements=(html,tag)=>[...html.matchAll(new RegExp('<'+tag+'\\b[^>]*>','g'))].map(match=>attributes(match[0]));
@@ -32,7 +32,7 @@ function fixture(){
   };
 }
 function node(extra={}){return {innerHTML:'',textContent:'',hidden:false,disabled:false,value:'',dataset:{},classList:{add(){},remove(){},toggle(){}},querySelector(){return null;},querySelectorAll(){return [];},...extra};}
-function ui(state=fixture()){
+function ui(state=fixture(),{handle}={}){
   const events={},requests=[],nodes={'#app':node(),'#modal':node({open:false,showModal(){this.open=true;},close(){this.open=false;}}),'#modal-content':node(),'#toast':node(),'#draft-generation-status':node()};
   class FormDataMock{
     constructor(form){this.entries=Object.entries(form.values||{});}
@@ -43,7 +43,8 @@ function ui(state=fixture()){
   const context=vm.createContext({URL,Intl,Date,Math,structuredClone,AbortSignal,FormData:FormDataMock,console,crypto:{randomUUID:()=>`mock-${requests.length}`},setTimeout:()=>1,clearTimeout(){},confirm:()=>true,
     document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[],activeElement:{id:''},addEventListener:(type,handler)=>{events[type]=handler;}},location:{hash:'',replace(){}},window:{scrollTo(){}},
     fetch:async(url,options={})=>{
-      const request={url,method:options.method||'GET',body:options.body?JSON.parse(options.body):undefined};requests.push(request);
+      const request={url,method:options.method||'GET',body:options.body?JSON.parse(options.body):undefined,headers:options.headers||{}};requests.push(request);
+      const custom=await handle?.(request,state);if(custom)return custom;
       if(url==='/api/state'&&request.method==='GET')return reply(state);
       if(/^\/api\/accounts\/[^/]+\/settings$/.test(url)&&request.method==='PUT'){
         const account=state.accounts.find(item=>url===`/api/accounts/${item.id}/settings`);account.settings={...account.settings,...request.body};return reply(account.settings);
@@ -147,18 +148,72 @@ test('report metrics keep three core cards and surface nonzero issue routes with
   }
 });
 
-test('account connection and daily automation controls have one home in account management',()=>{
+test('account connection and automation are available from account menu and details without a management page',()=>{
   const view=ui();
   assert.equal(view.run("knownPages.has('settings')"),false);
   assert.equal(view.run("nestedPages.settings"),'overview');
   assert.doesNotMatch(source,/function settings\(|ai-connection-form|data-page="settings"/);
-  view.run("page='accounts'");const accounts=view.run('accounts()');
-  for(const action of ['publisher-connect','daily']){
-    const controls=elements(accounts,'button').filter(button=>button['data-action']===action);assert.deepEqual(controls.map(button=>button['data-id']),['official']);
-  }
+  assert.equal(view.run("knownPages.has('accounts')"),false);assert.doesNotMatch(source,/function accounts\(/);
+  const menu=view.run('accountMenuMarkup()');assert.doesNotMatch(menu,/data-page="accounts"|账号管理/);
+  const daily=elements(menu,'button').filter(button=>button['data-action']==='daily');assert.deepEqual(daily.map(button=>button['data-id']),['official']);
+  view.run("accountModal('official')");const details=view.nodes['#modal-content'].innerHTML;
+  const connections=elements(details,'button').filter(button=>button['data-action']==='publisher-connect');assert.deepEqual(connections.map(button=>button['data-id']),['official']);
+  assert.match(details,/name="enabled"/);assert.match(details,/data-action="account-archive"[^>]*data-id="official"/);assert.doesNotMatch(details,/account-card|发布目标 ID/);
   view.run("page='calendar'");const calendar=view.run('calendar()');
   assert.doesNotMatch(calendar,/data-action="daily"|data-ai-connector|data-publisher-connector|data-feishu-connector|每日任务设置/);
   assert.match(calendar,/月历|暂无排期/);
+});
+
+test('saving account details preserves the hidden publisher identity and stays in its workspace',async()=>{
+  const state=fixture();state.accounts[0].bridgeAccountId='existing-publisher-target';
+  const view=ui(state,{handle:(request,state)=>{if(request.url==='/api/accounts/official'&&request.method==='PUT'){Object.assign(state.accounts[0],request.body);return reply(state.accounts[0]);}}});
+  view.run("workspaceId='official';page='product';render=()=>{};accountModal('official')");
+  await view.submit(node({id:'account-form',dataset:{id:'official'},values:{'account-name':'更新名称',type:'official','account-handle':'Official','account-profile':'https://www.xiaohongshu.com/user/profile/example','account-notes':'备注',enabled:'on'}}));
+  const write=view.requests.find(r=>r.method==='PUT');assert.equal(write.url,'/api/accounts/official');assert.equal(write.body.bridgeAccountId,'existing-publisher-target');assert.equal(view.run('currentWorkspaceId()'),'official');assert.equal(view.run('page'),'product');
+});
+
+test('adding an account saves the previous draft first and then opens the new independent workspace',async()=>{
+  const state=fixture(),newAccount={...clone(state.accounts[1]),id:'new-account',name:'新小号'};
+  state.drafts=[{id:'old-draft',accountId:'official',title:'原稿',body:'正文',revision:1}];state.productAssets=[{id:'old-photo',kind:'image'}];
+  const view=ui(state,{handle:(request,state)=>{
+    if(request.url==='/api/accounts'&&request.method==='POST'){state.accounts.push(newAccount);return reply(newAccount);}
+    if(request.url==='/api/state'&&request.headers['X-RedPilot-Account']==='new-account')return reply({...clone(state),workspaceAccountId:'new-account',defaultAccountId:'new-account',product:{name:'',brand:'新小号',summary:'',facts:[],conditions:[],restrictions:[],sources:[]},drafts:[],productAssets:[],inspirations:[],operationReports:[]});
+  }});
+  view.run("workspaceId='official';page='library';selected='old-draft';edit=structuredClone(S.drafts[0]);render=()=>{};saveCompleted=false;flushDraftSave=async()=>{saveCompleted=true}");
+  await view.submit(node({id:'account-form',dataset:{id:''},values:{'account-name':'新小号',type:'personal',enabled:'on'}}));
+  assert.equal(view.run('saveCompleted'),true);assert.equal(view.requests.filter(r=>r.url==='/api/accounts').length,1);assert.equal(view.run('currentWorkspaceId()'),'new-account');assert.equal(view.run('S.product.name'),'');assert.equal(view.run('S.drafts.length'),0);assert.equal(view.run('S.productAssets.length'),0);assert.equal(view.run('edit'),null);assert.equal(view.run('selected'),null);assert.equal(view.run('page'),'library');assert.equal(state.drafts[0].id,'old-draft');assert.equal(state.productAssets[0].id,'old-photo');assert.equal(view.run('busy'),false);
+});
+
+test('account creation never submits if the previous draft save fails',async()=>{
+  const view=ui();view.run("workspaceId='official';page='studio';studioView='draft';selected='old-draft';edit={id:'old-draft',body:'不能丢失'};dirty=true;render=()=>{};flushDraftSave=async()=>{throw Error('原稿保存失败')}");
+  await view.submit(node({id:'account-form',dataset:{id:''},values:{'account-name':'新小号',type:'personal',enabled:'on'}}));
+  assert.equal(view.requests.some(r=>r.url==='/api/accounts'),false);assert.equal(view.run('currentWorkspaceId()'),'official');assert.equal(view.run('edit.body'),'不能丢失');assert.equal(view.run('dirty'),true);assert.equal(view.run('busy'),false);
+});
+
+test('a new account whose workspace cannot load remains available without replacing the previous editor',async()=>{
+  const state=fixture(),newAccount={...clone(state.accounts[1]),id:'new-account',name:'新小号'};state.drafts=[{id:'old-draft',accountId:'official',title:'原稿',body:'正文',revision:1}];
+  const view=ui(state,{handle:(request,state)=>{
+    if(request.url==='/api/accounts'&&request.method==='POST'){state.accounts.push(newAccount);return reply(newAccount);}
+    if(request.url==='/api/state'&&request.headers['X-RedPilot-Account']==='new-account')return reply({error:'工作区暂不可用'},503);
+  }});
+  view.run("workspaceId='official';page='studio';studioView='draft';selected='old-draft';edit=structuredClone(S.drafts[0]);render=()=>{}");
+  await view.submit(node({id:'account-form',dataset:{id:''},values:{'account-name':'新小号',type:'personal',enabled:'on'}}));
+  assert.equal(view.run('currentWorkspaceId()'),'official');assert.equal(view.run('selected'),'old-draft');assert.equal(view.run('edit.id'),'old-draft');assert.equal(view.run('S.drafts[0].id'),'old-draft');assert.match(view.run('accountMenuMarkup()'),/新小号/);assert.equal(view.run('busy'),false);
+});
+
+test('an account created before the old workspace refresh fails stays selectable without losing the current page',async()=>{
+  for(const page of ['studio','product']){
+    const state=fixture(),newAccount={...clone(state.accounts[1]),id:'new-account',name:'新小号'};state.drafts=[{id:'old-draft',accountId:'official',title:'原稿',body:'原稿正文',revision:1}];
+    const view=ui(state,{handle:(request,state)=>{
+      if(request.url==='/api/accounts'&&request.method==='POST'){state.accounts.push(newAccount);return reply(newAccount);}
+      if(request.url==='/api/state'&&request.headers['X-RedPilot-Account']==='official')return reply({error:'旧工作区刷新失败'},503);
+    }});
+    view.context.currentPage=page;view.run("workspaceId='official';page=currentPage;studioView='draft';selected='old-draft';edit=structuredClone(S.drafts[0]);productFormDirty=page==='product';pageRenders=0;render=()=>{pageRenders++}");
+    view.nodes['#app'].innerHTML='UNSAVED_CURRENT_PAGE';view.nodes['.sidebar-auth']=node();
+    await view.submit(node({id:'account-form',dataset:{id:''},values:{'account-name':'新小号',type:'personal',enabled:'on'}}));
+    assert.equal(view.requests.filter(r=>r.url==='/api/accounts'&&r.method==='POST').length,1);assert.equal(view.requests.filter(r=>r.url==='/api/state'&&r.headers['X-RedPilot-Account']==='official').length,1);assert.equal(view.requests.some(r=>r.url==='/api/state'&&r.headers['X-RedPilot-Account']==='new-account'),false);
+    assert.equal(view.run('currentWorkspaceId()'),'official');assert.equal(view.run('page'),page);assert.equal(view.run('selected'),'old-draft');assert.equal(view.run('edit.body'),'原稿正文');assert.equal(view.run('S.accounts.some(a=>a.id==="new-account")'),true);assert.equal(view.run('pageRenders'),0);assert.equal(view.nodes['#app'].innerHTML,'UNSAVED_CURRENT_PAGE');assert.equal(view.run('productFormDirty'),page==='product');assert.match(view.nodes['.sidebar-auth'].innerHTML,/data-action="workspace-switch" data-id="new-account"/);assert.match(view.nodes['.sidebar-auth'].innerHTML,/新小号/);assert.equal(view.run('busy'),false);assert.equal(view.run('workspaceSwitching'),false);
+  }
 });
 
 test('daily automation retains the clicked account without a second account picker or cross-account save',async()=>{
@@ -170,6 +225,12 @@ test('daily automation retains the clicked account without a second account pick
   await view.submit(node({id:form.id,dataset:{id:form['data-id']},values:{accountId:account.value,enabled:'on',time:'11:30',timezone:'Asia/Shanghai',mode:'review',imageShare:'80'}}));
   const writes=view.requests.filter(request=>request.method==='PUT');assert.equal(writes.length,1);assert.equal(writes[0].url,'/api/accounts/secondary/settings');assert.equal(writes[0].body.accountId,'secondary');
   assert.equal(writes[0].body.imageShare,80);assert.equal(writes[0].body.enabled,true);assert.deepEqual(view.state.accounts[0].settings,before);assert.equal(view.state.accounts[1].settings.time,'11:30');assert.equal(view.nodes['#modal'].open,false);
+});
+
+test('saving daily settings from the menu preserves an unsaved product form without repainting the page',async()=>{
+  const view=ui();view.run("workspaceId='official';page='product';productFormDirty=true;pageRenders=0;render=()=>{pageRenders++};daily('official')");view.nodes['#app'].innerHTML='UNSAVED_PRODUCT_FORM';
+  await view.submit(node({id:'settings-form',dataset:{id:'official'},values:{accountId:'official',enabled:'on',time:'12:00',timezone:'Asia/Shanghai',mode:'review',imageShare:'75'}}));
+  const writes=view.requests.filter(request=>request.method==='PUT');assert.equal(writes.length,1);assert.equal(writes[0].url,'/api/accounts/official/settings');assert.equal(writes[0].body.imageShare,75);assert.equal(view.run('page'),'product');assert.equal(view.run('currentWorkspaceId()'),'official');assert.equal(view.run('productFormDirty'),true);assert.equal(view.run('pageRenders'),0);assert.equal(view.nodes['#app'].innerHTML,'UNSAVED_PRODUCT_FORM');assert.equal(view.nodes['#modal'].open,false);
 });
 
 test('a report discovery still generates in the selected account with its saved source and instructions',async()=>{

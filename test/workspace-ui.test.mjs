@@ -6,7 +6,7 @@ const source=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
 const definitions=source.slice(0,source.indexOf("document.addEventListener('click'"));
 const reply=(value,status=200)=>({ok:status>=200&&status<300,status,json:async()=>structuredClone(value)});
 const defer=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
-const node=extra=>({innerHTML:'',textContent:'',open:false,inert:false,hidden:false,dataset:{},classList:{add(){},remove(){},toggle(){}},close(){this.open=false;},querySelectorAll(){return [];},...extra});
+const node=extra=>({innerHTML:'',textContent:'',open:false,inert:false,hidden:false,dataset:{},classList:{add(){},remove(){},toggle(){}},showModal(){this.open=true;},close(){this.open=false;},querySelector(){return null;},querySelectorAll(){return [];},...extra});
 function state(id='a'){return {workspaceAccountId:id,defaultAccountId:id,accounts:['a','b'].map((id,i)=>({id,name:i?'生活小号':'人类补丁',type:i?'personal':'official',enabled:true,archived:false,settings:{enabled:false}})),product:{name:id+'产品',facts:[],conditions:[],restrictions:[],sources:[]},productAssets:[],drafts:[],jobs:[],inspirations:[],creators:[],capabilities:{accounts:{}},events:[],imageJobs:[],draftGenerationJobs:[],operationReports:[],trendBoards:[],trendMatches:{[id]:[]}};}
 function ui({handle,stored='',confirm=true}={}){
  const requests=[],messages=[],saved=new Map(stored?[['redpilot.workspace',stored]]:[]),nodes={'#app':node(),'#modal':node(),'#modal-content':node(),'#toast':node()};
@@ -16,14 +16,23 @@ function ui({handle,stored='',confirm=true}={}){
  });vm.runInContext(definitions,context);context.initial=state();context.notify=message=>messages.push(message);vm.runInContext('S=initial;toast=notify;render=()=>{};',context);
  return {run:code=>vm.runInContext(code,context),context,requests,messages,saved,nodes};
 }
-test('sidebar menu unifies switching, management and logout; schedule has its own navigation',()=>{
+test('sidebar menu directly adds and edits accounts without a separate management page',()=>{
  const view=ui(),html=view.run('accountMenuMarkup()');
  assert.match(html,/人类补丁/);assert.match(html,/生活小号/);assert.equal((html.match(/data-action="workspace-switch"/g)||[]).length,2);
- assert.match(html,/data-page="accounts"/);assert.match(html,/data-action="logout"/);
+ assert.match(html,/data-action="account-new"/);assert.match(html,/data-action="account-edit"[^>]*data-id="a"/);assert.match(html,/data-action="daily"[^>]*data-id="a"/);assert.match(html,/data-action="logout"/);
+ assert.doesNotMatch(html,/data-page="accounts"|账号管理/);assert.equal(view.run("knownPages.has('accounts')"),false);assert.doesNotMatch(source,/function accounts\(/);
  assert.equal(view.run('labels.calendar'),'发布排期');assert.equal(view.run('labels.accounts'),undefined);
  assert.equal(view.run("workspaceRoot('calendar')"),'calendar');assert.equal(view.run("operationsAccountSelect()"),'');
  view.run("page='studio'");assert.doesNotMatch(view.run("topHead('创作工作台')"),/account-filter|operations-account/);
- assert.doesNotMatch(view.run('accounts()'),/生活小号|设为默认|账号列表|已归档<\/button>/);
+});
+test('legacy management routes return to the workspace while existing publication routes still open the calendar',async()=>{
+ const view=ui();
+ for(const route of ['accounts','accounts/list']){view.context.route=route;await view.run('nav(route)');assert.equal(view.run('page'),'overview');assert.equal(view.context.location.hash,'overview');}
+ await view.run("nav('accounts/calendar')");assert.equal(view.run('page'),'calendar');assert.equal(view.context.location.hash,'calendar');
+});
+test('adding an account from the menu opens its form directly without leaving the current workspace page',async()=>{
+ const view=ui();view.run("page='product'");view.context.add={dataset:{action:'account-new'}};await view.run('action(add)');
+ assert.equal(view.run('page'),'product');assert.equal(view.nodes['#modal'].open,true);assert.match(view.nodes['#modal-content'].innerHTML,/id="account-form" data-id=""/);assert.doesNotMatch(view.nodes['#modal-content'].innerHTML,/账号管理|account-card|发布目标 ID/);assert.equal(view.requests.length,0);
 });
 test('requests and all local media carry the current account, including raw model uploads',async()=>{
  const view=ui({handle:request=>request.url.includes('upload-model')?reply({id:'model-a'}):undefined});
@@ -82,7 +91,7 @@ test('archive refuses to leave the current workspace if preloading or archiving 
   assert.equal(view.run('currentWorkspaceId()'),'a');assert.equal(view.run('S.product.name'),'a产品');assert.equal(view.run("S.accounts.find(a=>a.id==='a').archived"),false);assert.equal(view.run('busy'),false);
   if(failing==='/api/state')assert.equal(view.requests.some(r=>r.url.endsWith('/archive')),false);
  }
- const single=ui();single.run('S.accounts=S.accounts.slice(0,1)');assert.doesNotMatch(single.run('accounts()'),/data-action="account-archive"/);
+ const single=ui();single.run("S.accounts=S.accounts.slice(0,1);accountModal('a')");assert.doesNotMatch(single.nodes['#modal-content'].innerHTML,/data-action="account-archive"/);
 });
 test('a stale response from the archived account cannot replace the destination workspace',async()=>{
  const gate=defer(),view=ui({handle:async request=>request.url==='/api/state'&&request.headers['X-RedPilot-Account']==='a'?(await gate.promise,reply(state())):request.url==='/api/accounts/a/archive'?reply({...state().accounts[0],archived:true}):request.url==='/api/accounts/b/default'?reply(state('b').accounts[1]):undefined});
