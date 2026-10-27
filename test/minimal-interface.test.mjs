@@ -68,6 +68,18 @@ test('daily workspace has useful report controls but no report settings or unrel
   view.run("page='studio'");assert.match(view.run('studio()'),/data-action="generate"/);
 });
 
+test('saved report tasks show only actionable titles without review counts or internal notes',()=>{
+  const state=fixture(),report=state.operationReports[0];
+  report.plans=[{id:'draft-review',title:'核对草稿：备用号',done:false,priority:'high',detail:'有 4 项需要核对，处理后再排期。',blockers:['产品资料已更新，请重新生成或核对后保存草稿','三份 syncedSources 均标记 complete=false','尚无完整实机验证'],sources:[{title:'PLAN_INTERNAL_SOURCE',url:'https://example.test/plan-internal'}],action:{type:'draft',id:'draft-1',label:'打开草稿'}}];
+  const original=clone(report.plans),view=ui(state);view.run("page='overview';workspaceId='secondary';operationsAccountId='secondary';reportDate='2026-10-26';render()");
+  const html=view.nodes['#app'].innerHTML;
+  assert.match(html,/核对草稿：备用号/);assert.match(html,/data-report-plan="draft-review"/);assert.match(html,/0 \/ 1/);
+  assert.doesNotMatch(html,/查看核对项|report-plan-details|report-blockers|有 4 项需要核对|处理后再排期|产品资料已更新|syncedSources|complete=false|实机验证|PLAN_INTERNAL_SOURCE|>优先</);
+  const action=elements(html,'button').find(button=>button['data-report-action']&&JSON.parse(button['data-report-action']).id==='draft-1');
+  assert.ok(action);assert.equal(action['data-account-id'],'secondary');assert.match(html,/可继续创作的发现/);assert.match(html,/href="#reference\/saved-reference"/);
+  assert.deepEqual(state.operationReports[0].plans,original);
+});
+
 test('product editing omits internal rule fields and saving visible copy preserves source context',async()=>{
   const state=fixture();state.product.conditions=['内部事实前提'];state.product.restrictions=['内部事实边界'];
   const view=ui(state),html=view.run('productFacts()');
