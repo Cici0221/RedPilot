@@ -158,7 +158,7 @@ test('account connection and daily automation controls have one home in account 
   }
   view.run("page='calendar'");const calendar=view.run('calendar()');
   assert.doesNotMatch(calendar,/data-action="daily"|data-ai-connector|data-publisher-connector|data-feishu-connector|每日任务设置/);
-  assert.match(calendar,/发布队列|暂无发布任务/);
+  assert.match(calendar,/月历|暂无排期/);
 });
 
 test('daily automation retains the clicked account without a second account picker or cross-account save',async()=>{
