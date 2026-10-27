@@ -28,7 +28,7 @@ function fixture(){
   };
 }
 function element(extra={}){return {innerHTML:'',textContent:'',hidden:false,disabled:false,value:'',dataset:{},classList:{add(){},remove(){},toggle(){}},querySelector(){return null;},querySelectorAll(){return [];},...extra};}
-function ui({state=fixture(),handle,storage=new Map()}={}){
+function ui({state=fixture(),handle,storage=new Map(),hash=''}={}){
   const requests=[],events={},timers=new Map(),notifications=[];let timerId=0;
   const nodes={
     '#app':element(), '#modal':element({open:false,showModal(){this.open=true;},close(){this.open=false;}}), '#modal-content':element(), '#toast':element(),
@@ -64,13 +64,13 @@ function ui({state=fixture(),handle,storage=new Map()}={}){
     localStorage:{getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
     setTimeout:(callback,delay)=>{const id=++timerId;timers.set(id,{callback,delay});return id;},clearTimeout:id=>timers.delete(id),
     document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[],activeElement:{id:''},addEventListener:(type,handler)=>{events[type]=handler;}},
-    location:{hash:'',replace(url){this.redirect=url;}},window:{scrollTo(){}},confirm:()=>true,crypto:{randomUUID:()=>`request-${requests.length}`}});
+    location:{hash,replace(url){this.redirect=url;}},window:{scrollTo(){}},confirm:()=>true,crypto:{randomUUID:()=>`request-${requests.length}`}});
   vm.runInContext(definitions,context);context.initial=clone(state);context.notify=message=>notifications.push(message);
   vm.runInContext('S=initial;toast=notify;',context);vm.runInContext(listeners,context);
   const run=code=>vm.runInContext(code,context);
   return {state,context,nodes,requests,notifications,timers,storage,run,stubRender(){run('render=()=>{}');},async submit(form,button=element({value:'confirm'})){await events.submit({target:form,submitter:button,preventDefault(){}});return button;},input(target){events.input({target});}};
 }
-function beginEdit(view,id='d1'){view.context.draftId=id;view.run("page='studio';selected=draftId;edit=structuredClone(S.drafts.find(d=>d.id===draftId));dirty=false;");}
+function beginEdit(view,id='d1'){view.context.draftId=id;view.run("page='studio';studioView='draft';selected=draftId;location.hash='draft/'+encodeURIComponent(draftId);edit=structuredClone(S.drafts.find(d=>d.id===draftId));dirty=false;");}
 
 test('source creation goes through unified collection directly into a draft job',async()=>{
   const view=ui();view.stubRender();view.run("page='trends';operationsAccountId='official'");
@@ -356,6 +356,7 @@ test('replacing a chosen image preserves its position and the other pictures',as
 
 test('an image finishing after switching drafts is committed only to the captured draft',async()=>{
   const gate=deferred(),state=fixture();state.productAssets.push({id:'new-image',name:'新图',kind:'image',mime:'image/png',fileUrl:'/media/new.png',metadata:{}});
+  state.drafts[1].accountId='official';
   const view=ui({state,handle:async(request,{state})=>{
     if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
     await gate.promise;const result={...request.body,revision:2};state.drafts[0]=result;return response(result);
@@ -381,6 +382,7 @@ test('typing during an image replacement survives the response and the following
 
 test('switching drafts while replacement is saving also waits for text typed during that save',async()=>{
   const gate=deferred(),state=fixture();let firstWrite=true;
+  state.drafts.push({...clone(state.drafts[0]),id:'next-draft',title:'下一篇草稿'});
   state.productAssets.push({id:'new-image',name:'新图',kind:'image',mime:'image/png',fileUrl:'/media/new.png',metadata:{}});
   const view=ui({state,handle:async(request,{state})=>{
     if(request.url!=='/api/drafts/d1'||request.method!=='PUT')return;
@@ -389,8 +391,8 @@ test('switching drafts while replacement is saving also waits for text typed dur
     const result={...request.body,revision:state.drafts[0].revision+1};state.drafts[0]=result;return response(result);
   }});view.stubRender();beginEdit(view);
   const replacing=view.run("commitDraftImage('new-image',{draftId:'d1',revision:1,replaceAssetId:'photo'})");await turn();view.run("edit.body='切稿前必须保存的正文';markDraftChanged()");
-  const switching=view.run("switchDraftSelection('d2')");await turn();assert.equal(view.run('selected'),'d1');gate.resolve();await Promise.all([replacing,switching]);
-  assert.equal(view.state.drafts[0].body,'切稿前必须保存的正文');assert.deepEqual(view.state.drafts[0].productAssetIds,['new-image']);assert.equal(view.run('selected'),'d2');assert.equal(view.run('dirty'),false);
+  const switching=view.run("nav('draft/next-draft')");await turn();assert.equal(view.run('selected'),'d1');gate.resolve();await Promise.all([replacing,switching]);
+  assert.equal(view.state.drafts[0].body,'切稿前必须保存的正文');assert.deepEqual(view.state.drafts[0].productAssetIds,['new-image']);assert.equal(view.run('selected'),'next-draft');assert.equal(view.run('dirty'),false);
 });
 
 test('autosave merges a verified background image attachment and retries without losing local text',async()=>{
@@ -454,6 +456,7 @@ test('polling current-draft images preserves dirty text and never rerenders the 
 
 test('a crop saved after changing drafts keeps its source lineage and replaces the original image in place',async()=>{
   const gate=deferred(),state=fixture();state.productAssets.push({id:'second',name:'第二张',kind:'image',mime:'image/png',fileUrl:'/media/second.png',metadata:{}});state.drafts[0].productAssetIds=['photo','second'];
+  state.drafts[1].accountId='official';
   const view=ui({state,handle:async(request,{state})=>{
     if(request.url!=='/api/product-assets/upload')return;
     await gate.promise;const asset={id:'cropped',name:request.body.name,kind:'image',mime:'image/png',fileUrl:'/media/cropped.png',metadata:{adjustedFromAssetId:request.body.sourceAssetId}};state.productAssets.push(asset);return response(asset);
@@ -505,11 +508,11 @@ test('image controls reorder and remove by identity without duplicating or dropp
 
 test('failed saves keep input, selection and navigation until a successful retry',async()=>{
   let fail=true;
-  const view=ui({handle:request=>request.method==='PUT'&&fail?response({error:'保存暂不可用'},503):undefined});view.stubRender();beginEdit(view);view.run("accountFilter='official';location.hash='studio';edit.title='不能丢的输入';markDraftChanged()");
+  const view=ui({handle:request=>request.method==='PUT'&&fail?response({error:'保存暂不可用'},503):undefined});view.stubRender();beginEdit(view);view.run("accountFilter='official';edit.title='不能丢的输入';markDraftChanged()");
   await assert.rejects(view.run('flushDraftSave()'),/保存暂不可用/);assert.equal(view.run('dirty'),true);assert.equal(view.run('edit.title'),'不能丢的输入');assert.match(view.nodes['#save-state'].textContent,/保存失败/);assert.equal(view.nodes['[data-action="save-retry"]'].hidden,false);
   view.context.target=element({dataset:{action:'edit',id:'d2'}});await view.run('action(target)');
-  assert.equal(view.run('selected'),'d1');assert.equal(view.run('accountFilter'),'official');assert.equal(view.run('edit.title'),'不能丢的输入');assert.equal(view.context.location.hash,'studio');
-  assert.equal(await view.run("switchDraftSelection('secondary',{account:true})"),false);assert.equal(view.run('accountFilter'),'official');assert.equal(view.nodes['#account-filter'].value,'official');
+  assert.equal(view.run('selected'),'d1');assert.equal(view.run('accountFilter'),'official');assert.equal(view.run('edit.title'),'不能丢的输入');assert.equal(view.context.location.hash,'draft/d1');
+  assert.equal(await view.run("nav('studio')"),false);assert.equal(view.run('accountFilter'),'official');assert.equal(view.run('selected'),'d1');assert.equal(view.context.location.hash,'draft/d1');
   fail=false;await view.run('flushDraftSave()');assert.equal(view.run('dirty'),false);assert.equal(view.run('draftSaveError'),'');assert.equal(view.run('edit.title'),'不能丢的输入');
 });
 
@@ -550,8 +553,9 @@ test('confirmation waits for pending save and surfaces a stale preview without s
 test('completed generation notifies once without a persistent completion banner',()=>{
   const view=ui();view.stubRender();beginEdit(view);view.run("dirty=true;S.draftGenerationJobs=[{id:'watched',status:'completed',draftId:'d2',referenceId:'pending',accountId:'secondary'},{id:'old',status:'completed',draftId:'d1',accountId:'official'},{id:'active',status:'running',phase:'generating',referenceId:'pending',accountId:'official'}];draftGenerationWatched.add('watched');openCompletedGeneration();openCompletedGeneration()");
   assert.equal(view.notifications.filter(message=>message.includes('草稿已生成')).length,1);assert.equal(view.run('selected'),'d1');assert.equal(view.run('edit.id'),'d1');
-  const markup=view.run('draftGenerationJobsMarkup()');assert.doesNotMatch(markup,/data-generation-job-id="(?:watched|old)"|草稿已生成/);assert.match(markup,/data-generation-job-id="active"/);
+  assert.equal(view.run('draftGenerationJobsMarkup()'),'');
   view.run("dirty=false;page='library';openCompletedGeneration()");assert.equal(view.notifications.filter(message=>message.includes('草稿已生成')).length,1);assert.equal(view.run('selected'),'d1');
+  const markup=view.run('draftGenerationJobsMarkup()');assert.doesNotMatch(markup,/data-generation-job-id="(?:watched|old)"|草稿已生成/);assert.match(markup,/data-generation-job-id="active"/);
 });
 
 function assertNewCreationOnly(view){
@@ -606,16 +610,17 @@ test('only the current creation result opens and an earlier completion cannot re
 
 test('reload restores the pending creation for its workspace instead of falling back to an old draft',async()=>{
   const first=ui();first.stubRender();beginEdit(first);await first.run("enqueueDraftGeneration({referenceId:'pending'})");
-  const restored=ui({state:first.state,storage:first.storage});restored.stubRender();await restored.run('refresh(false)');
+  const restored=ui({state:first.state,storage:first.storage,hash:'#studio/generation'});restored.stubRender();await restored.run('refresh(false)');
   assertNewCreationOnly(restored);assert.match(restored.run('studio()'),/生成|排队/);
 });
 
-test('switching back to a workspace restores its new creation before the first render',async()=>{
+test('switching back to a workspace restores its creation task in the list without opening an old draft',async()=>{
   const view=ui();view.stubRender();beginEdit(view);await view.run("enqueueDraftGeneration({referenceId:'pending'})");
   view.context.official=clone(view.state);view.context.official.workspaceAccountId='official';
   view.context.secondary={...clone(view.state),workspaceAccountId:'secondary',draftGenerationJobs:[]};
   view.run("applyWorkspaceState('secondary',secondary);applyWorkspaceState('official',official)");
-  assertNewCreationOnly(view);assert.match(view.run('studio()'),/生成|排队/);
+  assert.equal(view.run('studioView'),'list');assert.equal(view.run('selected'),null);assert.equal(view.run('edit'),null);assert.ok(view.run('currentStudioCreation()'));
+  const html=view.run('studio()');assert.doesNotMatch(html,/id="draft-form"|id="studio-images"|data-action="schedule"/);assert.match(html,/生成|排队/);
 });
 
 test('a completed task without its draft stays separate and keeps polling until the new draft arrives',async()=>{

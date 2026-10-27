@@ -461,6 +461,42 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 .studio-creation.is-error .studio-creation-symbol{color:var(--error-text);background:#fff3ec}
 .generation-history{display:grid;gap:10px}
 .generation-history .btn{text-align:left;white-space:normal;line-height:1.6}
+.studio-library-tools{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:22px}
+.studio-draft-filters{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.studio-draft-filters .filter{padding:9px 15px;border-radius:8px}
+.studio-draft-search{width:260px;margin:0;flex:none}
+.studio-draft-search input{width:100%;padding:11px 14px}
+.studio-draft-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.studio-draft-card{display:grid;grid-template-columns:96px minmax(0,1fr) 18px;align-items:stretch;gap:20px;min-width:0;padding:18px;border:1px solid var(--line);border-radius:14px;background:#fff;text-align:left;color:var(--ink);cursor:pointer;transition:border-color .15s,box-shadow .15s}
+.studio-draft-card:hover{border-color:#b8d4f8;box-shadow:0 5px 18px #284e7c09}
+.studio-draft-card:focus-visible,.studio-task-card:focus-visible{outline:3px solid #007aff45;outline-offset:3px}
+.studio-draft-cover{display:grid;place-items:center;align-self:start;aspect-ratio:3/4;overflow:hidden;border:1px solid #e8edf5;border-radius:8px;background:#f5f7fb}
+.studio-draft-cover>img{display:block;width:100%;height:100%;object-fit:contain}
+.studio-draft-cover-empty{display:flex;flex-direction:column;align-items:center;gap:9px;color:var(--muted);font-size:14px;line-height:1.4}
+.studio-draft-cover-empty svg{width:25px;height:25px;color:#7f98b8}
+.studio-draft-info{display:flex;flex-direction:column;align-items:flex-start;min-width:0;padding:1px 0}
+.studio-draft-type{margin-bottom:5px;color:var(--muted);font-size:14px;line-height:1.5}
+.studio-draft-title{display:-webkit-box;overflow:hidden;-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:19px;line-height:1.5;font-weight:600;overflow-wrap:anywhere}
+.studio-draft-state{display:flex;align-items:center;flex-wrap:wrap;gap:7px 10px;margin-top:12px;color:var(--muted);font-size:14px;line-height:1.5}
+.studio-draft-state .badge{font-size:13px;line-height:1.4}
+.studio-draft-info>time{margin-top:auto;padding-top:12px;color:var(--muted);font-size:14px;line-height:1.5}
+.studio-draft-arrow{align-self:center;color:#8da1bb;font-size:20px}
+.studio-draft-empty{padding:55px 24px}
+.studio-task-card{display:flex;align-items:center;gap:15px;width:100%;margin:0 0 20px;padding:17px 20px;border:1px solid #d8e8fb;border-radius:12px;background:#f5f9ff;text-align:left;cursor:pointer;color:var(--ink)}
+.studio-task-symbol{display:grid;place-items:center;flex:none;width:42px;height:42px;border-radius:12px;background:#e6f1ff;color:var(--link-text)}
+.studio-task-symbol svg{width:23px;height:23px}
+.studio-task-card>span:nth-child(2){display:grid;min-width:0;gap:4px}
+.studio-task-card strong{font-size:16px;line-height:1.5;font-weight:600}
+.studio-task-card>span:nth-child(2)>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:14px;line-height:1.5}
+.studio-task-arrow{margin-left:auto;color:var(--link-text);font-size:22px}
+.studio-task-card.is-error{background:#fff9f3;border-color:#efddc8}
+.studio-editor-title{min-width:0;flex:1}
+.studio-editor-title>.btn{padding:0;margin-bottom:12px;min-height:0;font-size:16px}
+.studio-editor-title>h1{max-width:100%;font-size:28px;overflow-wrap:anywhere}
+.studio-editor-head>.actions{align-self:flex-end;flex:none;padding-bottom:2px}
+@media(max-width:1100px){.studio-draft-card{grid-template-columns:82px minmax(0,1fr) 14px;gap:14px;padding:16px}.studio-draft-title{font-size:18px}}
+@media(max-width:900px){.studio-draft-grid{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:760px){.studio-library-tools{flex-wrap:wrap;gap:14px}.studio-draft-search{width:100%}.studio-draft-card{grid-template-columns:88px minmax(0,1fr) 14px}.studio-draft-filters .filter{padding:8px 12px}.studio-editor-title>h1{font-size:25px}.studio-editor-head>.actions{width:auto}.studio-task-card{padding:15px}.studio-draft-title{font-size:18px}}
 @keyframes creation-breathe{50%{opacity:.55;transform:scale(.96)}}
 @media(prefers-reduced-motion:reduce){.studio-creation-symbol.is-active{animation:none}}
 @media(max-width:600px){.studio-creation{min-height:320px;padding:36px 20px}.studio-creation h2{font-size:22px}}
