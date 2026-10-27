@@ -83,12 +83,12 @@ test('saved report tasks show only actionable titles without review counts or in
 test('product editing omits internal rule fields and saving visible copy preserves source context',async()=>{
   const state=fixture();state.product.conditions=['内部事实前提'];state.product.restrictions=['内部事实边界'];
   const view=ui(state),html=view.run('productFacts()');
-  assert.doesNotMatch(html,/使用条件|未验证承诺|name="conditions"|name="restrictions"|name="stage"|当前产品阶段|内部事实前提|内部事实边界/);
+  assert.doesNotMatch(html,/品牌 \/ 团队|name="brand"|使用条件|未验证承诺|name="conditions"|name="restrictions"|name="stage"|当前产品阶段|内部事实前提|内部事实边界/);
   assert.match(html,/产品名称/);assert.match(html,/产品一句话说明/);assert.match(html,/资料来源/);
   view.run('render=()=>{}');
-  await view.submit(node({id:'product-form',values:{name:'新产品名',brand:'品牌',stage:'内测',summary:'新介绍',facts:'一项卖点',sources:'https://example.test/product'}}));
+  await view.submit(node({id:'product-form',values:{name:'新产品名',summary:'新介绍',facts:'一项卖点',sources:'https://example.test/product'}}));
   const saved=view.requests.find(request=>request.url==='/api/product'&&request.method==='PUT');
-  assert.equal(saved.body.summary,'新介绍');assert.deepEqual(saved.body.facts,['一项卖点']);
+  assert.equal(saved.body.summary,'新介绍');assert.deepEqual(saved.body.facts,['一项卖点']);assert.equal(saved.body.brand,'品牌');
   assert.deepEqual(saved.body.conditions,['内部事实前提']);assert.deepEqual(saved.body.restrictions,['内部事实边界']);
 });
 
