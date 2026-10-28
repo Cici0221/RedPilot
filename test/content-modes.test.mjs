@@ -40,7 +40,7 @@ async function fixture(t, { env = {}, fetcher } = {}) {
   await login();
   return {
     get store() { return app.store; },
-    tick: date => app.tick(date),
+    tick: async date => {await app.tick(date);await app.drainDraftGenerations();},
     async reopen() {
       await app.close();
       app = await createApp({ feishuReader: async () => ({ status: 'unavailable', documents: [], sources: [], error: 'test-only offline' }), trendReader: async () => [], linkReader: async () => ({ status: 'unavailable', missing: [], error: 'test-only offline reader' }), root, directory, env, fetcher });

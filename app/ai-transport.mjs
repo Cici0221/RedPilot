@@ -19,7 +19,7 @@ function responseContent(item){
   throw new InputError('AI 图片输入格式不正确');
 }
 
-export function createAIRequest({baseUrl=DEFAULT_BASE,key,model,wireApi='chat',system,prompt,images=[],maxOutputTokens,timeoutMs=90000}){
+export function createAIRequest({baseUrl=DEFAULT_BASE,key,model,wireApi='chat',system,prompt,images=[],maxOutputTokens,timeoutMs=90000,signal}){
   const protocol=normalizeWireApi(wireApi);
   if(typeof baseUrl!=='string'||!baseUrl.trim()||typeof key!=='string'||!key||typeof model!=='string'||!model||typeof system!=='string'||typeof prompt!=='string'||!Array.isArray(images))throw new InputError('AI 请求配置不正确');
   let body;
@@ -29,7 +29,7 @@ export function createAIRequest({baseUrl=DEFAULT_BASE,key,model,wireApi='chat',s
     body={model,store:false,response_format:{type:'json_object'},messages:[{role:'system',content:system},{role:'user',content:[{type:'text',text:prompt},...images]}]};
     if(maxOutputTokens!==undefined)body.max_completion_tokens=maxOutputTokens;
   }
-  return {url:baseUrl.trim().replace(/\/+$/,'')+(protocol==='responses'?'/responses':'/chat/completions'),options:{method:'POST',redirect:'error',signal:AbortSignal.timeout(timeoutMs),headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify(body)}};
+  return {url:baseUrl.trim().replace(/\/+$/,'')+(protocol==='responses'?'/responses':'/chat/completions'),options:{method:'POST',redirect:'error',signal:signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs),signal]) : AbortSignal.timeout(timeoutMs),headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify(body)}};
 }
 
 function invalid(){return new InputError('模型未返回完整有效的 JSON，请检查模型及接口协议',502);}

@@ -14,7 +14,7 @@ const gate=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});ret
 function crc32(bytes){let crc=-1;for(const byte of bytes){crc^=byte;for(let i=0;i<8;i++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}return (crc^-1)>>>0;}
 function chunk(type,bytes){const name=Buffer.from(type),out=Buffer.alloc(bytes.length+12);out.writeUInt32BE(bytes.length);name.copy(out,4);bytes.copy(out,8);out.writeUInt32BE(crc32(Buffer.concat([name,bytes])),out.length-4);return out;}
 function png(color){const header=Buffer.alloc(13);header.writeUInt32BE(1);header.writeUInt32BE(1,4);header[8]=8;header[9]=2;return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',header),chunk('IDAT',deflateSync(Buffer.from([0,color,0,0]))),chunk('IEND',Buffer.alloc(0))]);}
-const copyResponse=index=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({title:'备用号安排'+index,body:'SimHelper 当前处于工程内测。SIM 必须移入设备，设备连接 Wi-Fi，手机需要互联网。',tags:['产品开发'],gaps:[],adaptation:'学习问题先行结构'})}}]}));
+const copyResponse=index=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({title:'备用号安排'+index,body:'SimHelper 当前处于工程内测。SIM 必须移入设备，设备连接 Wi-Fi，手机需要互联网。',tags:['产品开发'],gaps:[],adaptation:'学习问题先行结构',imageBrief:{basis:'original',layout:'上字下图',palette:'蓝白',typography:'大标题',productTreatment:'自有产品真实外观',pages:[{role:'cover',headline:'备用号安排',copy:[]},{role:'points',headline:'使用路径',copy:['SIM移入独立设备']},{role:'context',headline:'连接条件',copy:['设备连接Wi-Fi']}]}})}}]}));
 const imageResponse=index=>new Response(JSON.stringify({data:[{b64_json:png(90+index).toString('base64')}]}));
 const ok=result=>{assert.equal(result.status,200,JSON.stringify(result.data));return result.data;};
 async function waitUntil(read,message){for(let i=0;i<250;i++){const value=await read();if(value)return value;await new Promise(resolve=>setTimeout(resolve,20));}assert.fail(message);}
@@ -22,7 +22,7 @@ async function fixture(t,{onImage,release=()=>{}}={}){
   const directory=await mkdtemp(path.join(os.tmpdir(),'redpilot-auto-images-'));
   const credentials={email:'auto-images@example.test',password:'Fixture-'+randomBytes(18).toString('hex')};await configureAuth({directory,...credentials});
   const calls={copy:0,image:0,publish:0,imageRequests:[]};
-  const app=await createApp({root,directory,env,fetcher:async(url,options)=>{
+  const app=await createApp({root,directory,env,imageComposer:async(bytes,overlay)=>({bytes:Buffer.concat([bytes.subarray(0,-12),chunk('tEXt',Buffer.from('fixture\0composed')),bytes.subarray(-12)]),mime:'image/png',extension:'png',overlay}),qualityAssessor:async()=>({status:'passed',issues:[],checks:{}}),fetcher:async(url,options)=>{
     if(url.startsWith('https://copy.example/')){calls.copy++;return copyResponse(calls.copy);}
     if(url.startsWith('https://images.example/')){const index=++calls.image;calls.imageRequests.push({url,body:options.body});const custom=await onImage?.(index,options);return custom||imageResponse(index);}
     if(url.startsWith('https://publish.example/')){calls.publish++;return new Response(JSON.stringify({status:'pending'}));}

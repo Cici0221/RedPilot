@@ -40,12 +40,13 @@ export async function createStore(root, directory, { legacyBridgeAccountId = '' 
   const context = new AsyncLocalStorage();
   const currentAccountId = () => context.getStore() || state.defaultAccountId;
   const view = accountId => workspaceView(() => state, accountId);
-  let queue = Promise.resolve();
+  let queue = Promise.resolve(), revision=0, persisted=null;
   async function save() {
-    const tmp = filename+'.tmp'; await writeFile(tmp, JSON.stringify(state,null,2), {mode:0o600}); await rename(tmp,filename);
+    const serialized=JSON.stringify(state,null,2);if(serialized===persisted)return;
+    const tmp = filename+'.tmp'; await writeFile(tmp,serialized,{mode:0o600}); await rename(tmp,filename);persisted=serialized;revision++;
   }
   await save();
-  return { get state(){return view(currentAccountId());}, get rootState(){return state;}, directory, save,
+  return { get state(){return view(currentAccountId());}, get rootState(){return state;}, get revision(){return revision;}, directory, save,
     accountIds(){return state.accounts.map(account=>account.id);},
     run(accountId,fn){ensureWorkspace(state,accountId);return context.run(accountId,()=>fn(view(accountId)));},
     mutate(fn) {

@@ -213,7 +213,7 @@ test('native verification uses the frozen driver and target without reopening im
   await waitUntil(async () => f.calls.verify.length === 1, 'native verification did not start');
   const completed = await waitUntil(async () => (await state(f)).jobs.find(item => item.id === job.id && item.status === 'published'), 'native verification did not finish');
   assert.equal(f.calls.publish.length, 1); assert.equal(f.calls.verify.length, 1);
-  assert.deepEqual(f.calls.verify[0], { idempotencyKey: initial.idempotencyKey, accountId: PROFILE_ID, retry: false });
+  assert.deepEqual(f.calls.verify[0], { idempotencyKey: initial.idempotencyKey, accountId: PROFILE_ID, sessionId: f.accountId, retry: false });
   assert.equal(completed.publisherDriver, 'chrome'); assert.equal(completed.account, PROFILE_ID);
 });
 

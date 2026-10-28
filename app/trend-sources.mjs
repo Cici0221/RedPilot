@@ -392,6 +392,11 @@ async function chromeBoard(platform, env, fetcher, browser, timing) {
   return { status: 'unavailable', sourceUrl: platform.url, ...topicMetadata, items: [], ...safeTrendFailure(result || 'board_not_loaded') };
 }
 
+export function trendDomScripts() {
+  return [...TREND_PLATFORMS.map(platform=>({platformId:platform.id,script:`(${browserBoard.toString()})(${JSON.stringify(platform.id)},${JSON.stringify(DOMAINS[platform.id])})`})),
+    {platformId:'xiaohongshu',script:`(${browserClassicTopics.toString()})(${parseXhsClassicTopics.toString()})`}];
+}
+
 export async function fetchTrendBoards({ platformIds } = {}, env = process.env, fetcher = fetch, { sleep = delay, clock = () => performance.now() } = {}) {
   const ids = platformIds ?? TREND_PLATFORMS.map(platform => platform.id);
   if (!Array.isArray(ids) || ids.length > 7 || ids.some(id => typeof id !== 'string' || !BY_ID.has(id))) throw new InputError('请选择支持的热点平台');

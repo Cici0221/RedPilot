@@ -174,7 +174,8 @@ function resultImage(body) {
   return { bytes, ...rasterType(bytes) };
 }
 
-export async function generateImage(env = process.env, { request: input, sourceImages = [] }, fetcher = fetch) {
+export async function generateImage(env = process.env, { request: input, sourceImages = [] }, fetcher = fetch, {signal: externalSignal} = {}) {
+  if(externalSignal?.aborted)throw new InputError('生成已停止',499);
   const request = normalizeRequest(input);
   const files = referenceFiles(request, sourceImages);
   const { key, model } = credentials(env);
@@ -192,7 +193,7 @@ export async function generateImage(env = process.env, { request: input, sourceI
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify({ model, prompt, n: 1, size: request.size, output_format: 'png' });
   }
-  const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = externalSignal ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS),externalSignal]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   try {
     // GPT Image always returns b64_json. Never follow redirects or fetch output URLs.
     const response = await fetcher(url, { method: 'POST', headers, body, signal, redirect: 'error' });
@@ -202,8 +203,10 @@ export async function generateImage(env = process.env, { request: input, sourceI
       throw new InputError(`图片服务请求失败（HTTP ${status}），请检查配置或稍后重试`, 502);
     }
     const result = resultImage(await boundedJson(response));
+    if (externalSignal?.aborted) throw new InputError('生成已停止',499);
     return { ...result, model, size: request.size };
   } catch (error) {
+    if (externalSignal?.aborted) throw new InputError('生成已停止',499);
     if (signal.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError') throw new InputError('图片服务请求超时，请稍后重试', 504);
     if (error instanceof InputError) throw error;
     throw new InputError('图片服务请求未完成，请检查网络或稍后重试', 502);

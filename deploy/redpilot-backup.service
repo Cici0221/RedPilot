@@ -1,0 +1,11 @@
+[Unit]
+Description=RedPilot private verified runtime backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/redpilot/deploy.env
+ExecStart=/srv/redpilot/app/deploy/backup.sh
+TimeoutStartSec=30min
+UMask=0077

@@ -1,0 +1,21 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      REDPILOT_DOMAIN: ${REDPILOT_DOMAIN:?请填写与 REDPILOT_PUBLIC_URL 一致的域名}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      redpilot:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -68,7 +68,7 @@ export function imageRole(asset, assets = []) {
   }
   return 'image';
 }
-export function isPublishableImage(asset, assets = []) { return ['image', 'publication'].includes(imageRole(asset, assets)); }
+export function isPublishableImage(asset, assets = []) { return !asset?.metadata?.backgroundOnly && !asset?.metadata?.internal && (!asset?.metadata?.quality || asset.metadata.quality.status === 'passed') && ['image', 'publication'].includes(imageRole(asset, assets)); }
 export function isAutomaticImage(asset, assets = []) {
   if (!isPublishableImage(asset, assets)) return false;
   const byId = new Map(assets.map(value => [value.id, value])), seen = new Set();
@@ -80,12 +80,15 @@ export function isAutomaticImage(asset, assets = []) {
 }
 export function checks(d, product, assets = []) {
   const problems = [];
+  if(d.deletedAt||d.archivedAt)problems.push('请先恢复草稿');
   if (d.productVersion !== product.version) problems.push('产品资料已更新，请重新生成或核对后保存草稿');
   if ([...d.title].length > 20) problems.push('标题超过 20 字，请缩短');
   if ([...d.body].length > 1000) problems.push('正文超过 1000 字，请精简');
   if (d.contentMode !== 'text') {
     const selected = (d.productAssetIds || []).map(key => assets.find(asset => asset.id === key));
     if (!selected.some(asset => isPublishableImage(asset, assets))) problems.push('请至少选择一张真实产品图作为主图');
+    if (selected.some(asset => asset?.metadata?.quality && asset.metadata.quality.status !== 'passed')) problems.push('部分配图检查未通过，请更换或重新检查');
+    if (selected.some(asset => asset?.metadata?.backgroundOnly || asset?.metadata?.internal)) problems.push('请选择排版完成的图片');
     if (selected.some(asset => imageRole(asset, assets) === 'test')) problems.push('测试图片不能用于发布，请更换产品成品图');
     if (selected.some(asset => imageRole(asset, assets) === 'modelPreview')) problems.push('3D 模型预览图不能直接发布，请先制作成品配图');
   }

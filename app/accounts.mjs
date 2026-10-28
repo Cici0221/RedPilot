@@ -94,7 +94,9 @@ export function updateAccount(state, accountId, input) {
     job.accountId === account.id && ((account.bridgeAccountId && unfinished(job)) || job.attempts > 0 || job.account))) {
     throw new InputError('账号存在排期或已提交的发布记录，不能更换发布账号 ID；请新建账号', 409);
   }
-  if(account.publisherDriver==='chrome'&&(updated.bridgeAccountId!==account.bridgeAccountId||updated.profileUrl!==account.profileUrl))updated.publisherConnection={status:'unconfigured',checkedAt:null,error:'账号资料已修改，请重新检查登录',publishVerified:false};
+  const identityChanged=updated.bridgeAccountId!==account.bridgeAccountId||updated.profileUrl!==account.profileUrl;
+  if(identityChanged){updated.performance=null;updated.performanceDailyKey=null;}
+  if(account.publisherDriver==='chrome'&&identityChanged)updated.publisherConnection={status:'unconfigured',checkedAt:null,error:'账号资料已修改，请重新检查登录',publishVerified:false};
   Object.assign(account, updated);
   return account;
 }

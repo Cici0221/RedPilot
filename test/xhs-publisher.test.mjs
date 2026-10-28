@@ -45,7 +45,7 @@ async function fixture(t, options = {}) {
       const marker = init.body.lastIndexOf('})('); assert.ok(marker > 0);
       const [op, args] = JSON.parse('[' + init.body.slice(marker + 3, -1) + ']');
       let value;
-      if (op === 'home') value = { status: 'ready', handle: config.switchAfterUpload && uploads.length ? 'ChangedAccount' : config.creatorHandle || 'CompanyFixture' };
+      if (op === 'home') value = { status: 'ready', ...(args.performance ? {dashboardText:config.dashboardText || '笔记数据总览\n统计周期 10-21 至 10-27\n曝光数 1,621\n环比 +12369%\n观看数 313\n环比 +6160%\n最新笔记'} : {}), handle: config.switchAfterUpload && uploads.length ? 'ChangedAccount' : config.creatorHandle || 'CompanyFixture' };
       if (op === 'profile') value = { status: 'ready', handle: 'CompanyFixture', notes: config.emptyProfile ? [] : [
         { url: note(OLD), title: '已有笔记' },
         ...(submitted || config.appeared ? [{ url: note(NEW), title: '产品使用方法' }] : [])
@@ -55,6 +55,12 @@ async function fixture(t, options = {}) {
         value = { status: 'ready', title: fresh ? '产品使用方法' : '已有笔记', body: fresh ? (config.wrongBody ? '不是同一正文' : '步骤一\n步骤二\n\n#产品') : '旧正文',
           authorUrl: profile(config.wrongAuthor ? B : A), imageCount: fresh ? (config.wrongCount ? 2 : config.imageCount || 1) : 0, hasVideo: !fresh };
       }
+      if (op === 'text-inspect') value = {status:'ready',entryCount:config.textAvailable ? 1 : 0, editorCount:config.textStage === 'editor' ? 1 : 0, cardText:config.cardText || '',templateReady:config.textStage === 'templates',cardKeys:[config.selectedCard || 'card:default']};
+      if (op === 'text-open') {config.textStage='editor'; value={status:config.textAvailable ? 'opened' : 'ambiguous'};}
+      if (op === 'text-fill') {config.cardText=args.text;value={status:'filled'};}
+      if (op === 'text-generate') {config.textStage='templates';value={status:'generating'};}
+      if (op === 'text-template') {config.selectedCard='card:selected';value={status:'selected',selectedKey:config.selectedCard};}
+      if (op === 'text-next') {config.textStage='publish';uploads=['platform-text-card'];value={status:'next'};}
       if (op === 'inspect') value = { status: 'ready', fileInputCount: config.ambiguousFile ? 2 : 1, selector: 'input.upload-input[type="file"]',
         titleCount: uploads.length ? config.ambiguousForm ? 2 : 1 : 0, editorCount: uploads.length ? 1 : 0, buttonCount: uploads.length ? 1 : 0,
         files: uploads.length ? [{ name: path.basename(uploads.at(-1)), size: PNG.length }] : [], imageCount: uploads.length,
@@ -99,9 +105,9 @@ test('login redirect is classified precisely and every own tab closes', async t 
   assert.equal(result.status, 'needs_login'); assert.equal(f.count('/eval'), 0); assert.equal(f.live.size, 0);
 });
 
-test('an empty profile cannot prove a publisher identity', async t => {
+test('a new account can bind with matching unique official handles before its first post', async t => {
   const f = await fixture(t, { emptyProfile: true });
-  assert.equal((await f.create().checkConnection(A)).status, 'unsupported'); assert.equal(f.live.size, 0);
+  const result=await f.create().checkConnection(A);assert.equal(result.status,'ready');assert.equal(result.evidence.method,'creator-handle/profile-handle');assert.equal(result.evidence.profileId,A);assert.equal(f.live.size,0);
 });
 
 test('foreign proxy and foreign navigations fail before reading or writing the page', async t => {
@@ -119,9 +125,9 @@ test('DOM expression guards a raced foreign location before accessing document',
   const result = runInNewContext(source, context); assert.equal(result.status, 'unavailable'); assert.equal(reads, 0);
 });
 
-test('text remains unsupported and invalid drafts never open Chrome', async t => {
+test('invalid drafts never open Chrome', async t => {
   const f = await fixture(t);
-  for (const post of [{ ...f.post, contentMode: 'text' }, { ...f.post, title: '超'.repeat(21) }, { ...f.post, body: '长'.repeat(1001) }, { ...f.post, images: [] }]) {
+  for (const post of [{ ...f.post, contentMode: 'unknown' }, { ...f.post, title: '超'.repeat(21) }, { ...f.post, body: '长'.repeat(1001) }, { ...f.post, images: [] }]) {
     const result = await f.create().publish({ ...f.input, post }); assert.equal(result.status, 'blocked'); assert.equal(result.submitted, false);
   }
   assert.equal(f.count('/new'), 0);
@@ -265,4 +271,38 @@ test('official same-note canonical redirects from profile cards to explore keep 
   const f = await fixture(t, { canonicalNotes: true });
   assert.equal((await f.create().checkConnection(A)).status, 'ready'); assert.equal(f.live.size, 0);
   const result = await f.create().publish(f.input); assert.equal(result.status, 'published'); assert.equal(result.verified, true); assert.equal(f.opCount('submit'), 1); assert.equal(f.live.size, 0);
+});
+
+
+test('native text cards follow the observed platform workflow, with no image upload', async t => {
+  const f = await fixture(t,{textAvailable:true});
+  const publisher = f.create();
+  const connection = await publisher.checkConnection(A); assert.equal(connection.text,true);
+  const result = await publisher.publish({...f.input,post:{...f.post,contentMode:'text',images:[],cardText:'测试文字卡片',textTemplate:'简约'}});
+  assert.equal(result.status,'published');assert.equal(f.count('/setFiles'),0);assert.equal(f.opCount('submit'),1);
+  assert.equal(f.opCount('text-generate'),1);assert.equal(f.config.cardText,'测试文字卡片');
+  assert.equal(Object.values((await f.state()).jobs)[0].expectedImageCount,1);
+});
+test('native text cards fail closed when the platform entry is unavailable', async t => {
+  const f=await fixture(t);const result=await f.create().publish({...f.input,post:{...f.post,contentMode:'text',images:[]}});
+  assert.equal(result.status,'blocked');assert.equal(f.count('/setFiles'),0);assert.equal(f.opCount('submit'),0);assert.match(result.error,/文字配图入口/);
+});
+test('account session is bound to a durable publishing job, never swapped for retry',async t=>{
+  const f=await fixture(t,{ambiguousForm:true});let sessionCalls=[];
+  const sessions={isLegacy:id=>!id || id==='legacy',status:id=>({mode:id?'isolated':'legacy'}),transport:async id=>{sessionCalls.push(id);if(!id || id==='legacy')return null;return async(route,body,jsonBody)=>{const result=await f.fetcher('http://127.0.0.1:3456'+route,{redirect:'error',signal:AbortSignal.timeout(1000),...(body===undefined?{}:{body:jsonBody?JSON.stringify(body):body})});return result.json();};}};
+  const publisher=createXhsPublisher({directory:f.directory,env:{},fetcher:f.fetcher,sessions});
+  await publisher.publish({...f.input,sessionId:'account-one'});const before=f.count('/new');
+  const swapped=await publisher.publish({...f.input,sessionId:'account-two',retry:true});
+  assert.equal(swapped.status,'blocked');assert.match(swapped.error,/另一个账号会话/);assert.equal(f.count('/new'),before);
+  assert.equal(Object.values((await f.state()).jobs)[0].sessionId,'account-one');assert.deepEqual(sessionCalls,['account-one']);
+});
+test('performance reads only a verified account and preserves the official date window',async t=>{
+  const f=await fixture(t);const result=await f.create().readPerformance(A);
+  assert.equal(result.status,'partial');assert.equal(result.accountId,A);assert.equal(result.summary.views,313);assert.equal(result.summary.impressions,1621);assert.equal(result.summary.likes,null);assert.deepEqual(result.notes,[]);
+  assert.equal(f.count('/setFiles'),0);assert.equal(f.opCount('submit'),0);assert.equal(f.live.size,0);
+  f.config.creatorHandle='wrong';const wrong=await f.create().readPerformance(A);assert.equal(wrong.status,'unavailable');assert.equal(wrong.errorCode,'mismatch');assert.equal(wrong.summary,undefined);
+});
+test('closed isolated sessions return an actionable error without using legacy Chrome',async t=>{
+ const f=await fixture(t);const publisher=createXhsPublisher({directory:f.directory,env:{},fetcher:f.fetcher,sessions:{isLegacy:()=>false,transport:async()=>{throw Object.assign(Error('请打开此账号的登录窗口'),{code:'session_closed'});}}});
+ const result=await publisher.checkConnection(A,{sessionId:'other'});assert.equal(result.status,'unavailable');assert.equal(result.errorCode,'session_closed');assert.match(result.error,/登录窗口/);assert.equal(f.count('/new'),0);
 });

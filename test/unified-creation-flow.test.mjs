@@ -22,7 +22,7 @@ async function fixture(t,{env={},modelResponder}={}) {
     assert.equal(result.status,200);cookie=result.headers.get('set-cookie').split(';')[0];
   }
   await open();t.after(async()=>{await app.close();await rm(directory,{recursive:true,force:true});});
-  return {get store(){return app.store;},get calls(){return {external:externalCalls,reads};},tick:date=>app.tick(date),async reopen(){await app.close();await open();},
+  return {get store(){return app.store;},get calls(){return {external:externalCalls,reads};},tick:async date=>{await app.tick(date);await app.drainDraftGenerations();},async reopen(){await app.close();await open();},
     async request(url,data,method='POST',accountId){const result=await fetch(base+'/api/'+url,{method,signal:AbortSignal.timeout(5000),headers:{Origin:base,Cookie:cookie,'Content-Type':'application/json',...(accountId?{'X-RedPilot-Account':accountId}:{})},...(data===undefined?{}:{body:JSON.stringify(data)})});return {status:result.status,data:await result.json()};}};
 }
 function ok(result){assert.equal(result.status,200,JSON.stringify(result.data));return result.data;}

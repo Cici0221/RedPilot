@@ -31,7 +31,7 @@ async function fixture(t, env = {}, fetcher) {
     const image = s.productAssets.find(asset => asset.kind === 'image');
     for (const draft of s.drafts) draft.productAssetIds = [image.id];
   });
-  return { ...app, base, cookie, directory, async request(url, data, method = 'POST', extra = {}) {
+  return { ...app, tick:async date=>{await app.tick(date);await app.drainDraftGenerations();}, base, cookie, directory, async request(url, data, method = 'POST', extra = {}) {
     const response = await fetch(base + '/api/' + url, {
       method, headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json', ...extra },
       ...(data !== undefined ? { body: JSON.stringify(data) } : {})

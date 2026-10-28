@@ -1,0 +1,13 @@
+.git
+node_modules
+runtime
+.env
+.env.*
+*.log
+storage
+uploads
+browser-data
+playwright
+.venv
+venv
+test

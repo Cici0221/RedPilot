@@ -57,3 +57,12 @@ test('text drafts omit visual plans even when a provider returns one',async()=>{
   assert.equal(draft.contentMode,'text');assert.deepEqual(draft.slides,[]);
   assert.equal(Object.hasOwn(draft,'imageBrief'),false);assert.equal(draft.body,copy.body);
 });
+
+test('article-specific image pages retain only bounded valid structure and fall back without discarding the draft',async()=>{
+  const pages=[{role:'steps',headline:'准备好备用号',copy:[],layout:'上方标题，下方产品'},{role:'steps',headline:'放进设备',copy:['按正文介绍实际操作']},{role:'comparison',headline:'选择适合自己的方式',copy:[]}];
+  const draft=await run({value:{...copy,imageBrief:{...brief,pages}}});
+  assert.equal(draft.imageBrief.pages.length,3);assert.equal(draft.imageBrief.pages[0].role,'cover');assert.deepEqual(draft.imageBrief.pages[1].copy,pages[1].copy);
+  for(const invalid of [[],Array(7).fill(pages[0]),[{...pages[0],role:'invented'}],[{...pages[0],headline:'字'.repeat(45)}],[{...pages[0],copy:['bad\u0000text']}],[{...pages[0],copy:Array(3).fill('太多')}]] ) {
+    const next=await run({value:{...copy,imageBrief:{...brief,pages:invalid}}});assert.ok(next.imageBrief);assert.equal(Object.hasOwn(next.imageBrief,'pages'),false);assert.equal(next.title,copy.title);
+  }
+});

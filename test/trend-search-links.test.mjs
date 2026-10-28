@@ -62,7 +62,7 @@ test('each platform appearance opens its own keyword search without changing pro
   assert.equal(JSON.stringify(view.context.item),before);
 });
 
-test('recommended topic title uses the first current known source, falling back to a known stale source',()=>{
+test('recommendations use a current source and retain old search links only in the heat view',()=>{
   const view=ui();const sources=[
     {platformId:'unknown',url:'https://unknown.test/topic',stale:false},
     {platformId:'weibo',url:'https://weibo.com/original',stale:true},
@@ -74,6 +74,8 @@ test('recommended topic title uses the first current known source, falling back 
   const titleLink=()=>anchors(view.run('trendMatchMarkup()').match(/<h3>([\s\S]*?)<\/h3>/)[1])[0];
   const first=titleLink();assertNewTab(first);assert.equal(new URL(first.href).hostname,'www.zhihu.com');
   view.run('item.sources.forEach(source=>source.stale=true)');
+  assert.doesNotMatch(view.run('trendMatchMarkup()'),/<h3>/,'stale topics do not remain recommendations');
+  view.run("trendOrder='heat';item.sources.forEach((source,index)=>source.rank=index+1)");
   assert.equal(new URL(titleLink().href).hostname,'s.weibo.com');
 });
 

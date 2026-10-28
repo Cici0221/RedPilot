@@ -7,6 +7,7 @@ import path from 'node:path';
 import { createApp } from '../app/server.mjs';
 import { configureAuth } from '../app/auth.mjs';
 import { dailyKey } from '../app/content.mjs';
+import {TREND_PLATFORMS} from '../app/trend-sources.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const aiEnv = { REDPILOT_AI_KEY: 'test-only-editorial-key', REDPILOT_AI_MODEL: 'test-model', REDPILOT_AI_BASE_URL: 'https://model.example/v1' };
@@ -20,6 +21,7 @@ async function fixture(t, { env = {}, trendReader = async () => [], fetcher = as
   let currentEnv = env, app, base, cookie;
   async function open() {
     app = await createApp({ feishuReader: async () => ({ status: 'unavailable', documents: [], sources: [], error: 'test-only offline' }), root, directory, env: currentEnv, trendReader, fetcher, linkReader: offlineLinkReader });
+    await app.store.mutate(s=>{const account=s.accounts.find(item=>item.id===s.defaultAccountId);if(!account.notes)account.notes='手机双卡通信、出境旅行';});
     await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
     base = `http://127.0.0.1:${app.server.address().port}`;
     const response = await fetch(base + '/api/auth/login', { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify(credentials) });
@@ -60,6 +62,7 @@ function boards() {
     ] }
   ];
 }
+function completeBoards() {return TREND_PLATFORMS.map(platform=>({platformId:platform.id,name:platform.name,boardName:platform.boardName,sourceUrl:platform.url,status:'ready',fetchedAt:boardTime,items:[{id:platform.id,title:'手机通信测试话题',rank:1,url:platform.url}]}));}
 async function addAccount(f, name = '测试分号', notes = '') { return ok(await f.request('accounts', { name, type: 'personal', notes })); }
 async function createDiscussion(f, accountId, extra = {}) {
   return ok(await f.request('discussions', { accountId, title: '通信需求讨论', brief: '围绕自有产品已知事实组织内容', sources: [{ title: '真实参考笔记', url: noteUrl }], ...extra }, 'POST', { accountId }));
@@ -127,11 +130,11 @@ test('old and new accounts use the fixed daily report schedule while migration p
 });
 
 test('the independent Beijing trend schedule refreshes at 09:00 once per day with all account automation off', async t => {
-  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; return boards(); } }); await onlyTrendAutomation(f);
+  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; return completeBoards(); } }); await onlyTrendAutomation(f);
   await f.tick(new Date('2030-01-02T00:59:59.000Z')); assert.equal(reads, 0); assert.equal((await state(f)).trendSchedule.lastDailyKey, null);
   await f.tick(new Date('2030-01-02T01:00:00.000Z')); const first = await trendFinished(f, 1);
   assert.equal(reads, 1); assert.equal(first.trendSchedule.lastDailyKey, '2030-01-02'); assert.equal(first.trendRefreshJobs[0].reason, 'daily');
-  assert.equal(first.trendSchedule.lastJobId, first.trendRefreshJobs[0].id); assert.equal(first.trendSchedule.status, 'partial'); assert.ok(first.trendSchedule.lastCompletedAt);
+  assert.equal(first.trendSchedule.lastJobId, first.trendRefreshJobs[0].id); assert.equal(first.trendSchedule.status, 'completed'); assert.ok(first.trendSchedule.lastCompletedAt);
   await Promise.all([f.tick(new Date('2030-01-02T01:00:01.000Z')), f.tick(new Date('2030-01-02T02:00:00.000Z'))]);
   await f.tick(new Date('2030-01-03T00:59:59.000Z')); assert.equal(reads, 1);
   await f.tick(new Date('2030-01-03T01:00:00.000Z')); const next = await trendFinished(f, 2);
@@ -151,7 +154,7 @@ test('trend scheduling uses Asia/Shanghai even when the server host timezone is 
 });
 
 test('reopening after Beijing 09:00 catches up once and preserves the daily key across later restarts', async t => {
-  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; return boards(); } }); await onlyTrendAutomation(f);
+  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; return completeBoards(); } }); await onlyTrendAutomation(f);
   await f.tick(new Date('2030-01-02T00:59:00.000Z')); await f.reopen();
   await f.tick(new Date('2030-01-02T03:30:00.000Z')); await trendFinished(f, 1); assert.equal(reads, 1);
   await f.reopen(); await f.tick(new Date('2030-01-02T08:00:00.000Z')); assert.equal(reads, 1);
@@ -171,16 +174,22 @@ test('a manual refresh in flight is preserved and covers the daily refresh witho
   await f.tick(new Date('2030-01-02T02:00:00.000Z')); assert.equal(reads, 2); assert.equal((await state(f)).trendSchedule.lastDailyKey, '2030-01-02');
 });
 
-test('failed or interrupted daily refreshes remain visible without repeating every tick and the next day retries', async t => {
-  let reads = 0; const f = await fixture(t, { trendReader: async () => { reads++; throw Error('not a real network request'); } }); await onlyTrendAutomation(f);
-  await f.tick(new Date('2030-01-02T01:00:00.000Z')); const failed = await trendFinished(f, 1);
-  assert.equal(failed.trendSchedule.status, 'failed'); assert.ok(failed.trendSchedule.lastError);
-  await f.tick(new Date('2030-01-02T03:00:00.000Z')); assert.equal(reads, 1);
-  await f.store.mutate(s => { s.trendSchedule.lastDailyKey = '2030-01-03'; s.trendSchedule.lastJobId = 'interrupted-daily-trend'; s.trendSchedule.status = 'running'; s.trendRefreshJobs.push({ id: 'interrupted-daily-trend', reason: 'daily', status: 'running', createdAt: boardTime }); });
-  await f.reopen(); const interrupted = await state(f);
-  assert.equal(interrupted.trendSchedule.status, 'failed'); assert.match(interrupted.trendSchedule.lastError, /重启/);
-  await f.tick(new Date('2030-01-03T04:00:00.000Z')); assert.equal(reads, 1);
-  await f.tick(new Date('2030-01-04T01:00:00.000Z')); await trendFinished(f, 3); assert.equal(reads, 2);
+test('failed daily refreshes retry on bounded backoff and preserve the daily key across restart', async t => {
+  let reads=0;const f=await fixture(t,{trendReader:async()=>{reads++;throw Error('fixture unavailable');}});await onlyTrendAutomation(f);
+  await f.tick(new Date('2030-01-02T01:00:00Z'));const failed=await trendFinished(f,1);assert.equal(failed.trendSchedule.status,'failed');assert.ok(failed.trendSchedule.lastError);
+  await f.tick(new Date('2030-01-02T01:04:59Z'));assert.equal(reads,1);
+  for(const [delay,count] of [[5,2],[20,3],[60,4]]){
+    const current=await state(f),job=current.trendRefreshJobs[0],due=Date.parse(current.trendSchedule.nextRetryAt),requested=Date.parse(job.requestedAt);
+    assert.ok(due>=requested+delay*60000&&due<requested+(delay+1)*60000,'retry respects its bounded delay');
+    await f.tick(new Date(due-1));assert.equal(reads,count-1);
+    await f.tick(new Date(due+1000));await trendFinished(f,count);assert.equal(reads,count);
+  }
+  const exhausted=await state(f);assert.equal(exhausted.trendSchedule.nextRetryAt,null);assert.equal(exhausted.trendSchedule.retryCount,3);
+  await f.tick(new Date('2030-01-02T03:00:00Z'));assert.equal(reads,4);
+  await f.store.mutate(s=>{s.trendSchedule.lastDailyKey='2030-01-03';s.trendSchedule.lastJobId='interrupted-daily-trend';s.trendSchedule.status='running';s.trendRefreshJobs.push({id:'interrupted-daily-trend',reason:'daily',status:'running',createdAt:boardTime});});
+  await f.reopen();const interrupted=await state(f);assert.equal(interrupted.trendSchedule.status,'failed');assert.match(interrupted.trendSchedule.lastError,/重启/);
+  await f.tick(new Date('2030-01-03T04:00:00Z'));assert.equal(reads,4);
+  await f.tick(new Date('2030-01-04T01:00:00Z'));await trendFinished(f,6);assert.equal(reads,5);
 });
 
 test('the 09:00 report waits for the scheduled refresh even if a manual snapshot completed moments earlier', async t => {
@@ -197,12 +206,12 @@ test('the 09:00 report waits for the scheduled refresh even if a manual snapshot
   assert.equal(waiting.reportJobs[0].trendJobId, waiting.trendSchedule.lastJobId);
   release();
   const completed = await waitUntil(async () => { const s = await state(f); return s.reportJobs[0]?.status === 'completed' ? s : false; }, '09:00 report did not finish');
-  assert.ok(completed.operationReports[0].discoveries.some(discovery => discovery.title === title)); assert.equal(reads, 2);
+  assert.ok(completed.operationReports[0].discoveries.some(discovery => discovery.title === title), JSON.stringify({asOf:completed.operationReports[0].snapshot.asOf,titles:completed.operationReports[0].discoveries.map(item=>item.title)})); assert.equal(reads, 2);
 });
 
-test('a later enabled account catches up its Beijing daily report using a fresh snapshot', async t => {
-  let reads = 0;
-  const f = await fixture(t, { trendReader: async () => { reads++; return boards().map(board => ({ ...board,
+test('a later enabled account catches up its Beijing daily report using a full fresh snapshot after a pending failed-platform retry', async t => {
+  let reads = 0;const requestedPlatforms=[];
+  const f = await fixture(t, { trendReader: async request => { reads++;requestedPlatforms.push(request.platformIds||null); return boards().map(board => ({ ...board,
     fetchedAt: '2030-01-02T' + (reads === 1 ? '01:00:00.000Z' : '14:00:00.000Z') })); } });
   await onlyTrendAutomation(f);
   await f.tick(new Date('2030-01-02T01:00:00.000Z')); const morning = await trendFinished(f, 1), morningJob = morning.trendSchedule.lastJobId;
@@ -213,9 +222,11 @@ test('a later enabled account catches up its Beijing daily report using a fresh 
   });
   await f.tick(new Date('2030-01-02T14:00:00.000Z'));
   const complete = await waitUntil(async () => { const s = await state(f); return s.reportJobs[0]?.status === 'completed' ? s : false; }, 'catch-up report did not finish');
-  assert.equal(reads, 2); assert.equal(complete.trendRefreshJobs.length, 2); assert.notEqual(complete.reportJobs[0].trendJobId, morningJob);
+  assert.equal(reads, 3); assert.equal(complete.trendRefreshJobs.length, 3); assert.notEqual(complete.reportJobs[0].trendJobId, morningJob);
+  assert.equal(requestedPlatforms[0],null);assert.deepEqual(requestedPlatforms[1].sort(),['xiaohongshu','douyin','bilibili','zhihu','toutiao'].sort());assert.equal(requestedPlatforms[2],null);
+  assert.equal(complete.trendRefreshJobs.find(job=>job.id===complete.reportJobs[0].trendJobId).reason,'report');
   const discoveries = complete.operationReports[0].discoveries.filter(item => item.matchId);
-  assert.ok(discoveries.length > 0); assert.ok(discoveries.every(item => item.sources.every(source => source.fetchedAt === '2030-01-02T14:00:00.000Z')));
+  assert.ok(discoveries.length > 0); assert.ok(discoveries.every(item => item.sources.every(source => source.fetchedAt === '2030-01-02T14:00:00.000Z')), JSON.stringify(discoveries.map(item=>({title:item.title,readAt:item.sources.map(source=>source.fetchedAt)}))));
 });
 
 test('trend refresh preserves real per-platform ranks while merging one topic across boards', async t => {
@@ -412,7 +423,7 @@ test('legacy report settings endpoint accepts only the fixed schedule without ch
 
 test('daily reports run at Beijing 09:00 once per enabled account and share one trend refresh without publishing or messaging', async t => {
   let reads = 0, externalCalls = 0;
-  const f = await fixture(t, { trendReader: async () => { reads++; return boards(); }, fetcher: async () => { externalCalls++; throw Error('daily reports must not publish or send messages'); } });
+  const f = await fixture(t, { trendReader: async () => { reads++; return completeBoards(); }, fetcher: async () => { externalCalls++; throw Error('daily reports must not publish or send messages'); } });
   const official = (await state(f)).defaultAccountId, second = await addAccount(f, '第二个日报账号');
   const disabled = ok(await f.request('accounts', { name: '已暂停账号', enabled: false }));
   const archived = await addAccount(f, '归档账号'); ok(await f.request(`accounts/${archived.id}/archive`, {}));

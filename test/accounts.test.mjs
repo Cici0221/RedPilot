@@ -53,7 +53,7 @@ async function fixture(t, { env = {}, fetcher, legacy } = {}) {
   });
   return {
     get store() { return app.store; },
-    tick: date => app.tick(date),
+    tick: async date => {await app.tick(date);await app.drainDraftGenerations();},
     directory,
     async reopen() {
       await app.close();

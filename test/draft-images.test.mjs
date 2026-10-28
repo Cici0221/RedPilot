@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../app/server.mjs';
 import { configureAuth } from '../app/auth.mjs';
-import { queueDraftImages, settleDraftImageBatch, adoptDraftImage, planDraftImages } from '../app/draft-images.mjs';
+import { queueDraftImages, settleDraftImageBatch, adoptDraftImage, planDraftImages, recommendedImageCount } from '../app/draft-images.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const env = { REDPILOT_IMAGE_API_KEY: 'fixture-draft-image-key', REDPILOT_IMAGE_BASE_URL: 'https://images.example/v1', REDPILOT_IMAGE_MODEL: 'fixture-image' };
@@ -27,34 +27,33 @@ test('image plans assign copy-led pages, prefer genuine references and exclude t
   s.productAssets.unshift(image('test', { testOnly: true }), image('derived-test', { sourceAssetIds: ['test'] }),
     image('cad', { previewOnly: true }), image('other-draft', { usage: 'publication', aiGenerated: true, draftId: 'other' }),
     image('logo-png', {}, { name: 'RingHi-logo.png' }), image('icon', {}, { kind: 'icon', mime: 'image/svg+xml' }));
-  const plans = planDraftImages(s, s.drafts[0]);
+  const plans = planDraftImages(s, s.drafts[0], {count:3});
   assert.deepEqual(plans.map(p => p.role), ['cover', 'points', 'detail']);
   for (const plan of plans) {
     assert.deepEqual(plan.sourceAssetIds, ['original']); assert.equal(plan.mode, 'edit'); assert.equal(plan.size, '1024x1536');
     assert.ok(plan.prompt.length <= 4000); assert.ok(plan.copy.length <= 2);
   }
-  assert.deepEqual(plans[0].copy, []); assert.deepEqual(plans[2].copy, []);assert.equal(plans[2].headline,'RingHi的外观细节');
+  assert.deepEqual(plans[0].copy, []); assert.deepEqual(plans[2].copy, []);assert.equal(plans[2].headline,'RingHi');
   s.productAssets = []; s.product.facts = []; s.product.conditions = [];
-  const withoutSources = planDraftImages(s, s.drafts[0]);
-  assert.equal(withoutSources[0].mode, 'generate'); assert.match(withoutSources[0].prompt, /不能凭空生成产品硬件/);
+  const withoutSources = planDraftImages(s, s.drafts[0], {count:3});
+  assert.equal(withoutSources[0].mode, 'generate'); assert.match(withoutSources[0].prompt, /不可凭空生成产品硬件/);
   assert.deepEqual(withoutSources[2].copy, []);assert.equal(withoutSources[2].headline,'RingHi');
   s.productAssets = [image('cad', { previewOnly: true })];
   assert.match(planDraftImages(s, s.drafts[0])[0].prompt, /CAD几何参考/);
 });
 
-test('supplemental artwork follows this post instead of appending condition or promise lists', () => {
+test('artwork adapts to the actual article without fixed product conditions or telecom templates', () => {
   const s=unitState(),draft=s.drafts[0];
   s.product.conditions=['UNRELATED_NETWORK_REQUIREMENT'];s.product.restrictions=['UNRELATED_PROMISE_CHECK'];
-  draft.title='备用号留在哪里';draft.body='短信同步到 App 查看。来电可以在常用手机接听。你会把备用号留在哪里？';
-  const plans=planDraftImages(s,draft),page=plans[2];
-  assert.equal(page.role,'interaction');assert.equal(page.headline,'你会把备用号留在哪里？');assert.deepEqual(page.copy,[]);
-  for(const plan of plans){const printed=JSON.stringify({headline:plan.headline,copy:plan.copy});assert.doesNotMatch(printed,/UNRELATED_NETWORK_REQUIREMENT|UNRELATED_PROMISE_CHECK|使用条件|使用前提/);}
-  const single=planDraftImages(s,draft,{count:1,index:2})[0];assert.equal(single.index,2);assert.equal(single.role,page.role);assert.equal(single.headline,page.headline);
-  draft.body='短信同步到 App 查看。来电可以在常用手机接听。AI 接待后记录事项。';
-  const related=planDraftImages(s,draft)[2];assert.equal(related.role,'context');assert.deepEqual(related.copy,['AI 接待后记录事项']);
-  draft.title='设备怎样联网';draft.body='设备需要连接 Wi-Fi。常用手机需要联网。';
-  const explicit=planDraftImages(s,draft);assert.ok(explicit[1].copy.includes('设备需要连接 Wi-Fi'));assert.ok(explicit[1].copy.includes('常用手机需要联网'));
-  assert.equal(explicit[2].role,'detail');assert.deepEqual(explicit[2].copy,[]);
+  draft.title='把早餐准备变简单';draft.body='昨晚先分装食材。早上直接取出一份。';
+  assert.equal(recommendedImageCount(draft),1);assert.equal(planDraftImages(s,draft).length,1);
+  draft.body=Array.from({length:8},(_,index)=>`步骤${index+1}：挑选当季的新鲜食材，按一次早餐需要的量分装保存，第二天早上可以更快做好准备`).join('。');
+  const plans=planDraftImages(s,draft);assert.ok(plans.length>1&&plans.length<=6);
+  for(const plan of plans){const printed=JSON.stringify({headline:plan.headline,copy:plan.copy});assert.doesNotMatch(printed,/UNRELATED_NETWORK_REQUIREMENT|UNRELATED_PROMISE_CHECK|短信|来电|SIM/);assert.equal(plan.textOverlay.version,1);assert.match(plan.prompt,/绝对不要画进图中/);}
+  for(const count of [1,2,3,4,5,6])assert.equal(planDraftImages(s,draft,{count}).length,count);
+  const last=planDraftImages(s,draft,{count:1,index:5})[0];assert.equal(last.index,5);
+  draft.imageBrief={basis:'original',pages:[{role:'cover',headline:'早餐准备',copy:[]},{role:'steps',headline:'前一天先分装',copy:['准备一次早餐的份量']}]};
+  assert.equal(recommendedImageCount(draft),2);assert.equal(planDraftImages(s,draft)[1].headline,'前一天先分装');
 });
 
 test('reference-led plans use the saved visible brief without treating competitor screenshots as product images', () => {
@@ -64,12 +63,12 @@ test('reference-led plans use the saved visible brief without treating competito
   draft.title = 'RingHi｜备用号，还要带备用机？';
   draft.body = '旧号还在用，工作号也不能随便停。为了备用号还要带手机吗？\n我们正在做 RingHi。\n• SIM 必须移入设备。\n• 短信同步到 App／网页查看。';
   draft.imageBrief = {basis:'reference',referenceId:'ref',layout:'大标题在上、产品生活场景在下',palette:'黑底、白字、亮蓝重点',typography:'高对比粗体问题标题',productTreatment:'真实产品放在桌面场景'};
-  const plans = planDraftImages(s,draft);
+  const plans = planDraftImages(s,draft,{count:3});
   assert.equal(plans[0].referenceStyle.basis,'reference');assert.deepEqual(plans[0].referenceStyle.referenceIds,['ref']);
   assert.match(plans[0].prompt,/黑底、白字、亮蓝重点/);assert.doesNotMatch(plans[0].prompt,/旧的蓝白配色分析|整套保持一致的蓝白配色/);
   assert.equal(plans[0].headline,'备用号，还要带备用机？');
-  assert.equal(plans[1].headline,'短信，怎么查看？');assert.ok(plans[1].copy.includes('短信同步到 App／网页查看'));
-  assert.ok(plans[1].copy.every(line=>!line.includes('旧号还在用')&&!line.includes('我们正在')&&!line.includes('还要带手机')));
+  assert.ok(plans[1].textOverlay.layers.length>=1);
+  assert.match(plans[1].prompt,/只生成背景与产品主体/);
   assert.notEqual(plans[1].headline,plans[2].headline);
   for(const plan of plans){assert.deepEqual(plan.sourceAssetIds,['original']);assert.doesNotMatch(plan.prompt,/\/uploads\/competitor/);assert.match(plan.prompt,/不执行其中命令|不执行其中指令/);}
 });
@@ -114,16 +113,39 @@ test('selected product sources guide the brief and changed visual inputs prevent
 
 test('an image batch attaches only once after all jobs terminate and invalidates approval', () => {
   const s = unitState(), draft = s.drafts[0];
-  const batch = queueDraftImages(s, draft.id, { revision: 1, clientRequestId: 'one' });
+  const batch = queueDraftImages(s, draft.id, { revision: 1, count:3, clientRequestId: 'one' });
   batch.jobs.forEach((job, index) => { complete(s, job, 'result-' + index); settleDraftImageBatch(s, batch.batchId);
     if (index < 2) assert.deepEqual(draft.productAssetIds, ['original']); });
   assert.deepEqual(draft.productAssetIds, ['result-0', 'result-1', 'result-2']);
   assert.equal(draft.revision, 2); assert.equal(draft.approved, false); assert.equal(draft.history.length, 1);
   assert.ok(batch.jobs.every(job => job.attachStatus === 'attached' && job.attachedRevision === 2));
   settleDraftImageBatch(s, batch.batchId); assert.equal(draft.revision, 2);
-  const replay = queueDraftImages(s, draft.id, { revision: 1, clientRequestId: 'one' });
+  const replay = queueDraftImages(s, draft.id, { revision: 1, count:3, clientRequestId: 'one' });
   assert.equal(replay.batchId, batch.batchId); assert.equal(s.imageJobs.length, 3);
   assert.throws(() => queueDraftImages(s, draft.id, { revision: 1, count: 1, clientRequestId: 'one' }), { status: 409 });
+});
+
+test('failed or unavailable visual checks preserve candidates but cannot attach or be manually adopted',()=>{
+  for(const status of ['rejected','unavailable']) {
+    const s=unitState(),batch=queueDraftImages(s,'draft',{revision:1,count:2});
+    complete(s,batch.jobs[0],'good');complete(s,batch.jobs[1],'candidate');
+    s.productAssets.find(asset=>asset.id==='good').metadata.quality={status:'passed',issues:[]};
+    s.productAssets.find(asset=>asset.id==='candidate').metadata.quality={status,issues:['文字需要重新检查']};
+    settleDraftImageBatch(s,batch.batchId);
+    assert.deepEqual(s.drafts[0].productAssetIds,['good']);assert.equal(batch.jobs[0].attachStatus,'attached');
+    assert.equal(batch.jobs[1].attachStatus,'quality_review');assert.equal(batch.jobs[1].assetId,'candidate');
+    assert.throws(()=>adoptDraftImage(s,'draft',batch.jobs[1].id,{revision:s.drafts[0].revision}),{status:409});
+    s.productAssets.find(asset=>asset.id==='candidate').metadata.quality={status:'passed',issues:[]};
+    adoptDraftImage(s,'draft',batch.jobs[1].id,{revision:s.drafts[0].revision});assert.deepEqual(s.drafts[0].productAssetIds,['good','candidate']);
+  }
+});
+
+test('adaptive queue totals and replacement references retain the original product identity',()=>{
+  const s=unitState(),batch=queueDraftImages(s,'draft',{revision:1});assert.equal(batch.jobs.length,1);assert.equal(batch.jobs[0].total,1);
+  s.imageJobs=[];s.productAssets.push(image('background',{internal:true,aiGenerated:true}),image('composed',{usage:'publication',draftId:'draft',aiGenerated:true,backgroundAssetId:'background'}));
+  s.drafts[0].productAssetIds=['composed'];
+  const replacement=queueDraftImages(s,'draft',{revision:1,replaceAssetId:'composed'}).jobs[0];
+  assert.deepEqual(replacement.sourceAssetIds,['background','original']);assert.deepEqual(replacement.qualitySourceAssetIds,['original']);
 });
 
 test('concurrent edits, asset changes, product changes, archive and schedule prevent automatic attachment', () => {
@@ -132,6 +154,8 @@ test('concurrent edits, asset changes, product changes, archive and schedule pre
     s => { s.drafts[0].productAssetIds = []; },
     s => { s.product.version = 'v2'; },
     s => { s.accounts[0].archived = true; },
+    s => { s.drafts[0].archivedAt = new Date().toISOString(); },
+    s => { s.drafts[0].deletedAt = new Date().toISOString(); },
     s => { s.jobs.push({ draftId: 'draft', status: 'scheduled' }); },
     s => { s.drafts[0].accountId = 'other'; },
     s => { s.drafts = []; }
@@ -147,7 +171,7 @@ test('concurrent edits, asset changes, product changes, archive and schedule pre
 
 test('failed single-image retries preserve successful siblings and restore the original order', () => {
   const s = unitState();
-  const batch = queueDraftImages(s, 'draft', { revision: 1 });
+  const batch = queueDraftImages(s, 'draft', { revision: 1, count:3 });
   complete(s, batch.jobs[0], 'cover'); batch.jobs[1].status = 'failed'; complete(s, batch.jobs[2], 'conditions');
   settleDraftImageBatch(s, batch.batchId);
   assert.deepEqual(s.drafts[0].productAssetIds, ['cover', 'conditions']);
@@ -157,6 +181,53 @@ test('failed single-image retries preserve successful siblings and restore the o
   complete(s, retry.jobs[0], 'points'); settleDraftImageBatch(s, retry.batchId);
   assert.deepEqual(s.drafts[0].productAssetIds, ['cover', 'points', 'conditions']);
   assert.throws(() => queueDraftImages(s, 'draft', { revision: 3, retryJobId: batch.jobs[1].id }), { status: 409 });
+});
+
+test('quality-review candidates can be regenerated in place and completed good attempts cannot be retried', () => {
+  for(const qualityStatus of ['rejected','unavailable']) {
+    const s=unitState(),batch=queueDraftImages(s,'draft',{revision:1,count:3});
+    batch.jobs.forEach((job,index)=>complete(s,job,'initial-'+index));
+    s.productAssets.find(asset=>asset.id==='initial-1').metadata.quality={status:qualityStatus,issues:['正文不清晰']};
+    settleDraftImageBatch(s,batch.batchId);
+    const candidate=batch.jobs[1];assert.equal(candidate.attachStatus,'quality_review');
+    const retry=queueDraftImages(s,'draft',{revision:2,retryJobId:candidate.id});
+    assert.equal(retry.jobs[0].setId,batch.batchId);assert.equal(retry.jobs[0].index,1);assert.equal(retry.jobs[0].total,3);
+    complete(s,retry.jobs[0],'replacement');settleDraftImageBatch(s,retry.batchId);
+    assert.deepEqual(s.drafts[0].productAssetIds,['initial-0','replacement','initial-2']);
+    assert.throws(()=>queueDraftImages(s,'draft',{revision:3,retryJobId:candidate.id}),{status:409});
+    assert.ok(s.productAssets.some(asset=>asset.id==='initial-1'));
+  }
+});
+
+test('redoing an edited quality candidate preserves its latest text layers across retries', () => {
+  const s=unitState(),batch=queueDraftImages(s,'draft',{revision:1,count:1}),candidate=batch.jobs[0];
+  complete(s,candidate,'candidate');s.productAssets.find(asset=>asset.id==='candidate').metadata.quality={status:'rejected'};
+  candidate.overlayEdited=true;candidate.textOverlay.layers[0].text='我刚改好的图片标题';candidate.textOverlay.layers[0].fontSize=72;candidate.textOverlay.layers[0].color='#085bdd';candidate.textOverlay.layers[0].y=150;
+  const latest=structuredClone(candidate.textOverlay);settleDraftImageBatch(s,batch.batchId);
+  const retry=queueDraftImages(s,'draft',{revision:1,retryJobId:candidate.id}).jobs[0];
+  assert.deepEqual(retry.textOverlay,latest);assert.equal(retry.overlayEdited,true);assert.equal(retry.headline,'我刚改好的图片标题');assert.match(retry.prompt,/我刚改好的图片标题/);
+  retry.status='failed';const second=queueDraftImages(s,'draft',{revision:1,retryJobId:retry.id}).jobs[0];
+  assert.deepEqual(second.textOverlay,latest);assert.equal(second.overlayEdited,true);
+  assert.equal(s.drafts[0].title,'备用号码怎么放');
+});
+
+test('image changes preserve a complete restorable version and split the next typing history group', () => {
+  const s=unitState(),draft=s.drafts[0];
+  draft.gaps=['原始待补事实'];draft.productVersion='facts-v1';draft.updatedAt=new Date().toISOString();
+  draft.lastHistoryAt=draft.updatedAt;draft.lastHistoryKind='edit';
+  draft.history=Array.from({length:50},(_,index)=>({id:'history-'+index}));
+  const batch=queueDraftImages(s,'draft',{revision:1,count:1});complete(s,batch.jobs[0],'image-new');settleDraftImageBatch(s,batch.batchId);
+  assert.equal(draft.history.length,50);assert.equal(draft.lastHistoryKind,'image');
+  assert.equal(draft.history[0].kind,'image');assert.ok(draft.history[0].id);assert.equal(draft.history[0].productVersion,'facts-v1');
+  assert.deepEqual(draft.history[0].gaps,['原始待补事实']);assert.deepEqual(draft.history[0].productAssetIds,['original']);
+  draft.gaps.push('later');assert.deepEqual(draft.history[0].gaps,['原始待补事实']);
+});
+
+test('archived source images and model previews stay out of generated references', () => {
+  const s=unitState();s.productAssets.unshift(image('archived-photo',{}, {archivedAt:new Date().toISOString()}), image('archived-cad',{previewOnly:true}, {archivedAt:new Date().toISOString()}));
+  s.drafts[0].imageSourceAssetIds=['archived-photo'];assert.deepEqual(planDraftImages(s,s.drafts[0])[0].sourceAssetIds,['original']);
+  s.productAssets=s.productAssets.filter(asset=>asset.id!=='original');assert.deepEqual(planDraftImages(s,s.drafts[0])[0].sourceAssetIds,[]);
+  for(const field of ['deletedAt','archivedAt']) {s.drafts[0][field]=new Date().toISOString();assert.throws(()=>queueDraftImages(s,'draft',{revision:1}),{status:409});delete s.drafts[0][field];}
 });
 
 test('replacement keeps the target slot and manual adoption is scoped to the original draft and current revision', () => {
@@ -179,12 +250,12 @@ test('replacement keeps the target slot and manual adoption is scoped to the ori
 
 test('invalid, text-mode, stale and overlapping requests are rejected before creating jobs', () => {
   const s = unitState();
-  for (const input of [{}, { revision: 0 }, { revision: 1, count: 2 }, { revision: 1, instruction: 'x'.repeat(801) }]) {
+  for (const input of [{}, { revision: 0 }, { revision: 1, count: 7 }, { revision: 1, instruction: 'x'.repeat(801) }]) {
     assert.throws(() => queueDraftImages(s, 'draft', input)); assert.equal(s.imageJobs.length, 0);
   }
   assert.throws(() => queueDraftImages(s, 'draft', { revision: 1 }, { ready: false }), { status: 409 });
   s.drafts[0].contentMode = 'text'; assert.throws(() => queueDraftImages(s, 'draft', { revision: 1 }), { status: 409 });
-  s.drafts[0].contentMode = 'image'; queueDraftImages(s, 'draft', { revision: 1 });
+  s.drafts[0].contentMode = 'image'; queueDraftImages(s, 'draft', { revision: 1,count:3 });
   assert.throws(() => queueDraftImages(s, 'draft', { revision: 1 }), { status: 409 }); assert.equal(s.imageJobs.length, 3);
 });
 
@@ -205,7 +276,7 @@ async function fixture(t, fetcher) {
   await configureAuth({ directory, ...credentials });
   let app, base, cookie, callsToPublish = 0;
   const open = async () => {
-    app = await createApp({ root, directory, env, fetcher, trendReader: async () => [],
+    app = await createApp({ root, directory, env, fetcher, imageComposer:async(bytes,overlay)=>({bytes:Buffer.concat([bytes.subarray(0,-12),chunk('tEXt',Buffer.from('fixture\0composed')),bytes.subarray(-12)]),mime:'image/png',extension:'png',overlay}),qualityAssessor:async()=>({status:'passed',issues:[],checks:{}}),trendReader: async () => [],
       feishuReader: async () => ({ status: 'unavailable', documents: [], sources: [] }),
       xhsPublisher: { async publish() { callsToPublish++; }, async verify() { callsToPublish++; }, async close() {} } });
     await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
@@ -246,7 +317,7 @@ test('draft-image HTTP batches use the existing edit API sequentially, persist p
   });
   ok(await f.request('product-assets/upload', { name: '产品实拍.png', kind: 'image', data: png(100).toString('base64') }));
   const initial = ok(await f.request('state')), draft = initial.drafts[0];
-  const url = `drafts/${draft.id}/images`, input = { revision: draft.revision, clientRequestId: 'browser-unique-request' };
+  const url = `drafts/${draft.id}/images`, input = { revision: draft.revision,count:3, clientRequestId: 'browser-unique-request' };
   assert.equal((await f.request(url, input, { anonymous: true })).status, 401);
   assert.equal((await f.request(url, input, { origin: 'https://evil.example' })).status, 403);
   const batch = ok(await f.request(url, input));
@@ -274,7 +345,7 @@ test('provider failure retains other images and retry bills only the requested f
     return response(calls);
   });
   const draft = ok(await f.request('state')).drafts[0], url = `drafts/${draft.id}/images`;
-  const batch = ok(await f.request(url, { revision: 1 })), done = await waitForBatch(f, batch.batchId);
+  const batch = ok(await f.request(url, { revision: 1,count:3 })), done = await waitForBatch(f, batch.batchId);
   assert.equal(done.jobs[1].status, 'failed'); assert.equal(done.state.drafts[0].productAssetIds.length, 2);
   const retry = ok(await f.request(url, { revision: 2, retryJobId: done.jobs[1].id }));
   const retried = await waitForBatch(f, retry.batchId);

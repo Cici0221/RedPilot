@@ -31,7 +31,7 @@ const rewrite=(f,draft,extra={})=>f.request('draft-generations',{rewriteDraftId:
 async function waitFor(fn){for(let n=0;n<200;n++){const value=await fn();if(value)return value;await new Promise(resolve=>setTimeout(resolve,10));}assert.fail('rewrite task did not settle');}
 const finished=(f,id)=>waitFor(async()=>{const job=(await state(f)).draftGenerationJobs.find(j=>j.id===id);return ['failed','completed'].includes(job?.status)&&job;});
 
-test('rewrite sends the complete 8000-character original with a short instruction and creates a separate draft with provenance',async t=>{
+test('rewrite sends the complete 8000-character original with a short instruction and updates the current draft and preserves provenance',async t=>{
   let requestBody;
   const f=await fixture(t,{responder:async(_url,options)=>{requestBody=JSON.parse(options.body);return response();}}),reference=await source(f),base=await original(f,{referenceId:reference.id});
   const body='原稿正文'.repeat(1999)+'末尾标记',saved=ok(await f.request('drafts/'+base.id,{...base,body,tags:['原稿标签']},'PUT'));
@@ -41,7 +41,7 @@ test('rewrite sends the complete 8000-character original with a short instructio
   const before=(await state(f)).drafts.find(d=>d.id===saved.id),job=ok(await rewrite(f,before,{referenceId:reference.id})),done=await finished(f,job.id);assert.equal(done.status,'completed');
   const current=await state(f),result=current.drafts.find(d=>d.id===done.draftId),prompt=requestBody.messages.flatMap(m=>typeof m.content==='string'?[m.content]:m.content.filter(part=>part.type==='text').map(part=>part.text)).join('\n');
   assert.ok(prompt.includes(body));assert.ok(prompt.includes(before.title));assert.ok(prompt.includes('原稿标签'));assert.ok(prompt.includes('语气更自然，保留使用条件'));
-  assert.notEqual(result.id,before.id);assert.equal(result.rewriteDraftId,before.id);assert.equal(result.rewriteDraftRevision,before.revision);assert.deepEqual(result.referenceIds,before.referenceIds);assert.deepEqual(result.sourceLinks,sourceLinks);assert.equal(result.topicId,before.topicId);assert.equal(result.instruction,'语气更自然，保留使用条件');assert.deepEqual(current.drafts.find(d=>d.id===before.id),before);assert.equal(result.approved,false);assert.equal(current.jobs.length,0);assert.equal(f.calls,1);
+  assert.equal(result.id,before.id);assert.equal(result.revision,before.revision+1);assert.equal(result.history[0].body,before.body);assert.deepEqual(result.referenceIds,before.referenceIds);assert.deepEqual(result.sourceLinks,sourceLinks);assert.equal(result.topicId,before.topicId);assert.equal(result.instruction,'语气更自然，保留使用条件');assert.equal(result.title,'改写后的备用号场景');assert.deepEqual(result.productAssetIds,before.productAssetIds);assert.equal(result.approved,false);assert.equal(current.jobs.length,0);assert.equal(f.calls,1);
 });
 
 test('rewrites reject another account, unrelated references and template fallback before invoking any model',async t=>{

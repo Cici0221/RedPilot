@@ -289,3 +289,9 @@ test('browser DOM diagnostics distinguish login, verification, loading and an un
     }
   }
 });
+
+test('a targeted retry reads only its selected platform and coalesces duplicate IDs', async () => {
+  const calls=[];
+  const boards=await fetchTrendBoards({platformIds:['baidu','baidu']},{},async url=>{calls.push(url);assert.equal(new URL(url).hostname,'top.baidu.com');return new Response(baiduRow('1','手机通信'));});
+  assert.deepEqual(boards.map(board=>board.platformId),['baidu']);assert.equal(calls.length,1);assert.equal(boards[0].status,'ready');
+});

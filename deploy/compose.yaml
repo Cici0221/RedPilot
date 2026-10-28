@@ -1,0 +1,24 @@
+services:
+  redpilot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      REDPILOT_PUBLIC_URL: ${REDPILOT_PUBLIC_URL:?请填写最终访问地址}
+      REDPILOT_COOKIE_SECURE: ${REDPILOT_COOKIE_SECURE:-true}
+      REDPILOT_ISOLATED_BROWSER: "true"
+      REDPILOT_REMOTE_DESKTOP: ${REDPILOT_REMOTE_DESKTOP:-false}
+    ports:
+      - "127.0.0.1:${REDPILOT_PORT:-4317}:4317"
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - "${REDPILOT_RUNTIME_DIR:?请指定已恢复的运行目录}:/data"
+    shm_size: 1gb
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:4317/healthz','http://127.0.0.1:3456/health'].map(url=>fetch(url,{signal:AbortSignal.timeout(3000)}))).then(results=>process.exit(results.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3

@@ -153,6 +153,11 @@ function scrollPage(expected, folder) {
   return { scrolled: node.scrollTop > before, atEnd: node.scrollTop + node.clientHeight >= node.scrollHeight - 4 };
 }
 
+export function feishuDomScripts(url) {
+  const source=normalizeFeishuSource(url);
+  return [`(${extractPage.toString()})(${JSON.stringify(source)})`, `(${scrollPage.toString()})(${JSON.stringify(source)},false)`, `(${scrollPage.toString()})(${JSON.stringify(source)},true)`];
+}
+
 export async function readFeishuSources({ urls } = {}, env = process.env, fetcher = fetch) {
   if (!Array.isArray(urls) || !urls.length || urls.length > 20) throw new InputError('每次可同步1至20个飞书来源');
   const roots = [...new Set(urls.map(normalizeFeishuSource))];

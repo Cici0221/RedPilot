@@ -80,19 +80,28 @@ const GROUPS=[
   ['职场与效率',['职场','办公','效率','工作','打工人']]
 ];
 const contains=(text,term)=>/^[a-z\d]+$/i.test(term)?new RegExp('\\b'+term+'\\b','i').test(text):text.toLowerCase().includes(term.toLowerCase());
-function words(value){const stop=new Set(['我们','账号','产品','内容','宣传','运营','用户','需要','使用','公司','官方','当前','方向','平台','通过','正在']);return [...new Set([...new Intl.Segmenter('zh',{granularity:'word'}).segment(value)].filter(x=>x.isWordLike&&x.segment.length>=2&&!stop.has(x.segment)).map(x=>x.segment.toLowerCase()))].slice(0,80);}
-export function rankedTrends(state,account) {
-  const accountText=[account.name,account.notes||''].join(' '),productText=[state.product.name,state.product.summary,...state.product.facts].join(' ');
+function words(value){const stop=new Set(['我们','账号','产品','内容','宣传','运营','用户','需要','使用','公司','官方','当前','方向','平台','通过','正在','人类','补丁','全球','销售','团队','服务','管理','设备','独立','需要','功能','名称']);return [...new Set([...new Intl.Segmenter('zh',{granularity:'word'}).segment(value)].filter(x=>x.isWordLike&&x.segment.length>=2&&!stop.has(x.segment)).map(x=>x.segment.toLowerCase()))].slice(0,80);}
+export function sameTrendEvent(a,b) {
+  const left=titleKey(a),right=titleKey(b);if(left===right)return true;
+  const numbers=value=>[...value.matchAll(/\d+(?:\.\d+)?/g)].map(x=>x[0]).sort().join(',');if(numbers(left)!==numbers(right))return false;
+  if(left.length>=10&&right.length>=10&&(left.includes(right)||right.includes(left)))return true;
+  const first=new Set(words(a)),second=new Set(words(b));if(first.size<4||second.size<4)return false;
+  const overlap=[...first].filter(term=>second.has(term)).length;return overlap/Math.max(first.size,second.size)>=.8;
+}
+export function rankedTrends(state,account,{asOf=now()}={}) {
+  const cutoff=Date.parse(validTime(asOf)?asOf:now()),stale=board=>board.stale===true||!validTime(board.fetchedAt)||Date.parse(board.fetchedAt)>cutoff||cutoff-Date.parse(board.fetchedAt)>36*60*60*1000;
+  const accountText=account.notes||'',productText=[state.product.name,state.product.summary,...state.product.facts].join(' ');
   const accountWords=words(accountText),productWords=words(productText),groups=new Map();
   for(const board of state.trendBoards)for(const item of board.items||[]){
     const key=titleKey(item.title);if(!key)continue;
-    let group=groups.get(key);if(!group){group={id:hash('trend|'+key),title:item.title,appearances:[],sources:[],sourceIds:[],updatedAt:board.fetchedAt,stale:true};groups.set(key,group);}
+    if((account.dismissedTrends||[]).some(title=>sameTrendEvent(title,item.title)))continue;
+    let group=groups.get(key)||[...groups.values()].find(group=>sameTrendEvent(group.title,item.title));if(!group){group={id:hash('trend|'+key),title:item.title,appearances:[],sources:[],sourceIds:[],updatedAt:board.fetchedAt,stale:true};groups.set(key,group);}
     const classification=isTopicsBoard(board)?{kind:'topics'}:hasRank(item.rank)?{rank:item.rank}:{};
-    const appearance={platformId:board.platformId,boardName:board.boardName,...classification,url:item.url,stale:board.stale===true,fetchedAt:board.fetchedAt};
+    const appearance={platformId:board.platformId,boardName:board.boardName,...classification,url:item.url,stale:stale(board),fetchedAt:board.fetchedAt};
     if(!group.appearances.some(x=>x.platformId===board.platformId&&x.url===item.url)){
-      group.appearances.push(appearance);group.sources.push({title:item.title,url:item.url,platformId:board.platformId,...classification,fetchedAt:board.fetchedAt,stale:board.stale===true});group.sourceIds.push(item.id);
+      group.appearances.push(appearance);group.sources.push({title:item.title,url:item.url,platformId:board.platformId,...classification,fetchedAt:board.fetchedAt,stale:stale(board)});group.sourceIds.push(item.id);
     }
-    if(!board.stale)group.stale=false;
+    if(!appearance.stale)group.stale=false;
     if(board.fetchedAt>group.updatedAt)group.updatedAt=board.fetchedAt;
   }
   return [...groups.values()].map(group=>{
@@ -185,7 +194,7 @@ export function buildReport(state,account,day,{asOf=now()}={}) {
   const visible=record=>before(record.createdAt)&&before(record.updatedAt);
   const sameDay=value=>validTime(value)&&dailyKey(new Date(value),timezone)===day;
   const onDay=value=>sameDay(value)&&Date.parse(value)<=cutoff;
-  const drafts=state.drafts.filter(d=>d.accountId===account.id&&visible(d));
+  const drafts=state.drafts.filter(d=>d.accountId===account.id&&!d.archivedAt&&!d.deletedAt&&visible(d));
   const jobs=state.jobs.filter(j=>j.accountId===account.id&&visible(j));
   const scheduled=jobs.filter(j=>j.status!=='cancelled'&&sameDay(j.scheduledAt));
   const published=jobs.filter(j=>j.status==='published'&&onDay(j.publishedAt)&&isOfficialTrendUrl('xiaohongshu',j.noteUrl));
@@ -196,7 +205,7 @@ export function buildReport(state,account,day,{asOf=now()}={}) {
   const generationIssues=[...latestGenerations.values()].filter(j=>j.status==='failed');
   const ownedReferences=new Set(drafts.flatMap(d=>d.referenceIds||[]));
   for(const record of [...(state.topicPool||[]),...(state.discussions||[])].filter(r=>r.accountId===account.id&&visible(r)))for(const source of record.sources||[])if(source.kind==='reference'&&source.id)ownedReferences.add(source.id);
-  const direction=[account.name,account.notes||'',state.product.name,state.product.summary,...state.product.facts].join(' '),keywords=words(direction);
+  const direction=[account.notes||'',state.product.name,state.product.summary,...state.product.facts].join(' '),keywords=words(direction);
   const relatedReference=reference=>{
     if(reference.accountId&&reference.accountId!==account.id)return false;
     if(Array.isArray(reference.accountIds)&&reference.accountIds.length&&!reference.accountIds.includes(account.id))return false;
@@ -216,7 +225,7 @@ export function buildReport(state,account,day,{asOf=now()}={}) {
     {key:'new_references',label:'关联新收藏',value:newReferences.length,unit:'条',detail:'当天入库且已引用或与账号方向、产品资料相关的收藏',route:'#library'}
   ];
   const oldDone=new Map((prior?.plans||[]).map(p=>[p.key,p.done]));
-  const plan=(key,title,detail,sources,extra={})=>plans.push({id:prior?.plans.find(p=>p.key===key)?.id||id(),key,title,detail,sources,done:oldDone.get(key)||false,kind:'review',priority:'normal',blockers:[],...extra});
+  const plan=(key,title,detail,sources,extra={})=>plans.push({id:prior?.plans.find(p=>p.key===key)?.id||hash(account.id+'|'+day+'|'+key),key,title,detail,sources,done:account.todayPlanDone?.[day]?.[key]??oldDone.get(key)??false,kind:'review',priority:'normal',blockers:[],...extra});
   const action=(type,objectId,route,label)=>({type,...(objectId?{id:objectId}:{}),route,label});
   const draftForJob=job=>drafts.find(d=>d.id===job.draftId);
   const failureText={uncertain:'已提交但发布结果待核对，不能直接重发',blocked:'发布前检查未通过，需要先处理阻碍',failed:'发布任务失败，请打开记录核对原因'};
@@ -249,7 +258,7 @@ export function buildReport(state,account,day,{asOf=now()}={}) {
     const reason=ownedReferences.has(reference.id)?'已被本账号的草稿或收藏引用':'按共享资料库中的账号方向与产品关键词关联';
     discoveries.push({id:hash(day+'|ref|'+reference.id),kind:creator?'creator':'reference',title:(creator?'博主动态：':'新收藏：')+reference.title,detail:(creator?creator.name+' 的关联参考已入库。':'关联参考已保存。')+(readable?'可直接结合产品事实创作，无需先做额外拆解。':'先读取链接或补充截图，再生成草稿。'),reason,nextAction:readable?'结合自有产品事实生成原创草稿':'补齐参考正文或截图',sources:[internalSource('reference',reference)],referenceId:reference.id,...(creator?{creatorId:creator.id}:{}),action:action('reference',reference.id,'#reference/'+reference.id,'打开收藏')});
   }
-  for(const match of rankedTrends(state,account).filter(m=>m.score>0)){
+  for(const match of rankedTrends({...state,trendBoards:state.trendBoards.filter(board=>before(board.fetchedAt))},account,{asOf:capturedAt}).filter(m=>m.score>=2&&!m.stale)){
     const sources=match.sources.filter(source=>!source.stale&&onDay(source.fetchedAt));if(!sources.length)continue;
     discoveries.push({id:hash(day+'|'+match.id),kind:'trend',title:match.title,detail:match.reason+'。先核对与 '+state.product.name+' 的实际关联，再决定是否创作。',reason:match.reason,nextAction:'收藏或直接生成草稿',score:match.score,scoreMethod:match.scoreMethod,sources,matchId:match.id,action:action('trends',match.id,'#trends','查看热点')});
     if(discoveries.filter(item=>item.kind==='trend').length>=5)break;

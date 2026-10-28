@@ -1,0 +1,4 @@
+{$REDPILOT_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy redpilot:4317
+}

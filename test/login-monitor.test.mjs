@@ -218,3 +218,53 @@ test('a new failed browser check pauses a pending stale alert until expiry is co
   assert.equal(f.calls.send.length, 1); assert.equal(f.calls.send[0].idempotencyKey, outageId);
   await f.monitor.close();
 });
+
+test('temporary check failures retry at five and fifteen minutes, then notify once without claiming logout', async () => {
+  let status = 'unavailable';
+  const f = fixture({check: async () => ({status, accountId: PROFILE_A})});
+  await f.monitor.initialize(); await f.run(day(27));
+  assert.equal(f.calls.check.length, 1); assert.equal(f.calls.send.length, 0);
+  await f.run(day(27, '08:04:59')); assert.equal(f.calls.check.length, 1);
+  await f.run(day(27, '08:05:00')); assert.equal(f.calls.check.length, 2);
+  await f.run(day(27, '08:19:59')); assert.equal(f.calls.check.length, 2);
+  await f.run(day(27, '08:20:00')); assert.equal(f.calls.check.length, 3); assert.equal(f.calls.send.length, 1);
+  assert.match(f.calls.send[0].text, /检查未完成/); assert.match(f.calls.send[0].text, /尚不能判断/);
+  assert.doesNotMatch(f.calls.send[0].text, /登录已失效/);
+  const incident = f.state.accounts[0].loginMonitor.checkFailure.id;
+  await f.reopen(); await f.run(day(27, '09:20:00')); assert.equal(f.calls.check.length, 4); assert.equal(f.calls.send.length, 1);
+  await f.run(day(28)); assert.equal(f.calls.send.length, 1); assert.equal(f.state.accounts[0].loginMonitor.checkFailure.id, incident);
+  status = 'ready'; await f.run(day(28, '08:05:00'));
+  assert.equal(f.state.accounts[0].loginMonitor.status, 'ready'); assert.equal(f.state.accounts[0].loginMonitor.checkFailure, null);
+  assert.equal(f.state.accounts[0].loginMonitor.nextCheckAt, null);
+  await f.monitor.close();
+});
+
+test('successful same-day recheck ends retries without a notification', async () => {
+  let status = 'unavailable';
+  const f = fixture({check: async () => ({status, accountId: PROFILE_A})});
+  await f.monitor.initialize(); await f.run(day(27));
+  status = 'ready'; await f.run(day(27, '08:05:00')); await f.run(day(27, '20:00:00'));
+  assert.equal(f.calls.check.length, 2); assert.equal(f.calls.send.length, 0); assert.equal(f.state.accounts[0].loginMonitor.status, 'ready');
+  await f.monitor.close();
+});
+
+test('failed-check incidents do not replace confirmed logout incidents or send stale failures after recovery', async () => {
+  let status = 'unavailable';
+  const f = fixture({configured: false, check: async () => ({status, accountId: PROFILE_A})});
+  await f.monitor.initialize(); await f.run(day(27)); await f.run(day(27, '08:05:00')); await f.run(day(27, '08:20:00'));
+  assert.ok(f.state.accounts[0].loginMonitor.checkFailure);
+  status = 'needs_login'; await f.run(day(27, '09:20:00'));
+  assert.equal(f.state.accounts[0].loginMonitor.checkFailure, null);
+  assert.ok(f.state.accounts[0].loginMonitor.outage);
+  f.setConfigured(true); await f.run(day(27, '09:21:00'));
+  assert.equal(f.calls.send.length, 1); assert.match(f.calls.send[0].text, /需要重新登录/);
+  await f.monitor.close();
+});
+
+test('concurrent retry ticks claim only one new check and do not rewrite state between retry times', async () => {
+  const f = fixture({check: async () => ({status: 'unavailable'})});
+  await f.monitor.initialize(); await f.run(day(27)); const count = f.calls.writes;
+  await f.run(day(27, '08:01:00')); await f.run(day(27, '08:04:00')); assert.equal(f.calls.writes, count);
+  await Promise.all([f.monitor.tick(day(27,'08:05:00')), f.monitor.tick(day(27,'08:05:00'))]); await f.monitor.wait();
+  assert.equal(f.calls.check.length, 2); await f.monitor.close();
+});

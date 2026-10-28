@@ -1,0 +1,52 @@
+部署前准备
+
+先停止 RedPilot 和它打开的账号浏览器，再在项目目录执行：
+node scripts/runtime-backup.mjs create --runtime ./runtime --output /绝对路径/redpilot-backup --env-file ./.env
+node scripts/runtime-backup.mjs verify --backup /绝对路径/redpilot-backup
+
+备份包含账号、草稿、素材、发布记录、登录会话和本机连接配置。若已关联的外部模型丢失，默认中止；可在明确知道缺失的情况下加 --allow-missing-linked 保存其余资料，输出与清单会记录缺失数量。这种备份不包含丢失的原模型，恢复后仍须重新关联，也不参与自动清理的完整备份计数。已关联的外部模型会复制进备份；不会修改原模型或原资料。目录内含私密凭据，请保存在仅自己可读的磁盘，不要上传公开仓库。
+
+服务器恢复到全新目录：
+node scripts/runtime-backup.mjs restore --backup /绝对路径/redpilot-backup --runtime /srv/redpilot/runtime
+sudo chown -R 1000:1000 /srv/redpilot/runtime
+
+容器在 /data/.env 读取恢复的配置。若本机没有 .env，可以省略备份命令的 --env-file。
+备份与恢复全程离线；不会自动上传、删除现有目录或触发发布。
+
+启动：
+export REDPILOT_RUNTIME_DIR=/srv/redpilot/runtime
+export REDPILOT_PUBLIC_URL=https://你的域名
+docker compose -f deploy/compose.yaml up -d --build
+
+公网 HTTPS 入口（二选一）：
+已有反向代理：将上述域名的 HTTPS 请求转发到 127.0.0.1:4317，只开放代理的 HTTPS 端口。
+使用附带 Caddy：把域名 DNS 指向服务器并放行 80/443，设置 export REDPILOT_DOMAIN=你的域名（不带 https://，需与 REDPILOT_PUBLIC_URL 一致），再执行：
+docker compose -f deploy/compose.yaml -f deploy/compose.https.yaml up -d --build
+Caddy 自动申请及续期证书；证书保存到独立卷。RedPilot 与远程桌面自身端口仍只绑定本机。
+部署命令与日志如启用了 Caddy，请同时带上两个 -f 参数。
+REDPILOT_COOKIE_SECURE 默认开启；本地 HTTP 验证时才设置为 false。
+首次启动会执行已恢复的排期，迁移时请先在旧平台暂停自动发布并处理未完成发布任务。
+
+镜像包含 Chromium、Xvfb、中文字库、PDF 工具和 STEP 渲染依赖。以非 root 用户运行；服务器需允许 Chromium 使用的用户命名空间沙箱，不默认关闭沙箱。
+服务器内的账号浏览器需要重新登录；macOS 保存的加密 Cookie 不保证可在 Linux 解密。通过受控远程桌面完成登录，不开放调试端口到公网。
+镜像自动启动独立网页读取服务，监听容器内 127.0.0.1:3456，资料读取不依赖个人电脑或 Codex。独立浏览器的登录保存在 /data/reader-browser，只读取官方站点的可见页面。
+部署模式下所有发布账号自动使用独立浏览器会话，首次部署后从左下角打开对应账号登录并核对账号；读取浏览器不会执行发布脚本。
+
+远程登录（默认关闭，按需启用）：
+先用 docker compose -f deploy/compose.yaml run --rm --no-deps --entrypoint x11vnc redpilot -storepasswd /data/remote-desktop.password 交互创建密码，不把密码写进命令或公开仓库。
+export REDPILOT_REMOTE_DESKTOP=true
+docker compose -f deploy/compose.yaml up -d
+在自己的电脑执行 ssh -L 6080:127.0.0.1:6080 服务器用户名@服务器地址，然后打开 http://localhost:6080/vnc.html 输入上述密码。
+在读取浏览器登录小红书、知乎和飞书；发布账号从平台左下角打开对应账号登录窗口。完成后可以关闭远程桌面，账号浏览器仍在服务器运行。
+
+每日备份（北京时间 03:00，保留 7 份已校验备份）：
+将项目放在 /srv/redpilot/app，创建 /etc/redpilot/deploy.env，写入 REDPILOT_RUNTIME_DIR、REDPILOT_BACKUP_DIR、REDPILOT_PUBLIC_URL 三项绝对目录/正式域名配置；权限设为 600。
+sudo cp deploy/redpilot-backup.service deploy/redpilot-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now redpilot-backup.timer
+定时任务会短暂停止服务与浏览器以确保一致性，备份失败也会重新启动。损坏或非本工具创建的目录不会自动删除。
+REDPILOT_BACKUP_DIR 目录归容器用户 1000 所有，仅本机保存；需要异机副本时由用户另行配置传输。
+
+查看日志：docker compose -f deploy/compose.yaml logs --tail 100
+停止：docker compose -f deploy/compose.yaml stop
+升级前重新备份；恢复只支持新目录，确认恢复正常后再切换挂载路径。

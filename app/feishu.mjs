@@ -75,15 +75,25 @@ export function queueFeishuSync(state,input={},at=new Date()) {
   return job;
 }
 function docBelongsTo(d,urls){return urls.includes(d.url)||(d.sourceUrls||[]).some(url=>urls.includes(url));}
-export function productForAI(state) {
-  let remaining=24000;
-  const sources=state.feishuDocuments.filter(d=>docBelongsTo(d,feishuSources(state.product.sources))).slice().sort((a,b)=>(b.changedAt||'').localeCompare(a.changedAt||''));
-  const syncedSources=[];
-  for(const doc of sources){
-    if(!remaining)break;
-    const limit=Math.min(8000,remaining),text=doc.text.slice(0,limit);remaining-=text.length;
-    syncedSources.push({url:doc.url,title:doc.title,text,complete:doc.complete===true,stale:doc.stale===true,readAt:doc.readAt,contextTruncated:text.length<doc.text.length});
+export function indexDocument(text) {
+  const source=String(text||''),chunks=[];
+  const add=(start,end)=>{for(let position=start;position<end;position+=1000){const offset=Math.max(start,position-80),raw=source.slice(offset,Math.min(end,position+1000)),value=raw.trim();if(value)chunks.push({index:chunks.length,offset:offset+raw.indexOf(value),text:value});}};
+  let start=0;for(const separator of source.matchAll(/\n\s*\n|\n(?=#{1,6} )/g)){add(start,separator.index);start=separator.index+separator[0].length;}add(start,source.length);
+  return chunks;
+}
+function queryTerms(query){return [...new Set([...new Intl.Segmenter('zh',{granularity:'word'}).segment(String(query).toLowerCase())].filter(part=>part.isWordLike&&part.segment.length>=2&&!['产品','资料','生成','内容','希望','我们','账号','使用','当前'].includes(part.segment)).map(part=>part.segment))].slice(0,100);}
+export function productForAI(state,query='') {
+  const terms=queryTerms(query),sources=state.feishuDocuments.filter(d=>docBelongsTo(d,feishuSources(state.product.sources))).slice().sort((a,b)=>(b.changedAt||'').localeCompare(a.changedAt||''));
+  const candidates=sources.flatMap((doc,order)=>(doc.chunks||indexDocument(doc.text)).map(chunk=>({doc,chunk,order,score:terms.reduce((sum,term)=>sum+(chunk.text.toLowerCase().includes(term)?3:0)+(String(doc.title||'').toLowerCase().includes(term)?1:0),0)})));
+  candidates.sort((a,b)=>b.score-a.score||(a.chunk.index===0?-1:0)-(b.chunk.index===0?-1:0)||a.order-b.order||a.chunk.index-b.chunk.index);
+  let remaining=24000;const selected=new Map();
+  for(const entry of candidates){
+    if(remaining<=0)break;
+    const group=selected.get(entry.doc.url)||{doc:entry.doc,chunks:[],size:0,truncated:false},separator=group.chunks.length?2:0,budget=Math.min(8000-group.size,remaining)-separator;
+    if(budget<=0)continue;
+    const text=entry.chunk.text.slice(0,budget);group.chunks.push({...entry.chunk,text});group.truncated ||= text.length<entry.chunk.text.length;group.size+=text.length+separator;remaining-=text.length+separator;selected.set(entry.doc.url,group);
   }
+  const syncedSources=[...selected.values()].map(({doc,chunks,truncated})=>({url:doc.url,title:doc.title,text:chunks.sort((a,b)=>a.index-b.index).map(c=>c.text).join('\n\n'),segments:chunks.map(c=>({index:c.index,offset:c.offset})),complete:doc.complete===true,stale:doc.stale===true,readAt:doc.readAt,contextTruncated:truncated||chunks.length<(doc.chunks||indexDocument(doc.text)).length}));
   return {...state.product,syncedSources,syncedSourceCount:sources.length};
 }
 export function finishFeishuSync(state,job,result) {
@@ -113,6 +123,7 @@ export function finishFeishuSync(state,job,result) {
     if(!old)added++;else if(differs)changed++;else unchanged++;
     const doc=old||{id:id(),url,createdAt:time};
     Object.assign(doc,{title,text,contentHash,complete,readAt:validTime(input.readAt)?input.readAt:time,changedAt:differs?time:old.changedAt,lastAttemptAt:time,stale:false,status:complete?'ready':'partial',sourceUrls:[...new Set(parents)]});
+    if(differs||!doc.chunks)doc.chunks=indexDocument(doc.text);
     if(!old)state.feishuDocuments.unshift(doc);
     if(!complete)incomplete++;
   }

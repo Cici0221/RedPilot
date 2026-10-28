@@ -4,6 +4,8 @@ import { dateParts, dailyKey } from './content.mjs';
 export const LOGIN_MONITOR_SCHEDULE = Object.freeze({ time: '08:00', timezone: 'Asia/Shanghai' });
 const offline = status => ['needs_login', 'mismatch'].includes(status);
 const retryDelays = [15 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+const checkRetryDelays = [5 * 60_000, 15 * 60_000, 60 * 60_000, 3 * 60 * 60_000, 6 * 60 * 60_000];
+const retryDue = (monitor, date) => monitor?.status === 'failed' && Boolean(monitor.nextCheckAt) && new Date(monitor.nextCheckAt) <= date;
 export function publisherProfileId(account) {
   return String(account?.profileUrl || '').match(/^https:\/\/(?:www\.)?xiaohongshu\.com\/user\/profile\/([a-f\d]{24})(?:[/?#]|$)/i)?.[1]?.toLowerCase() || null;
 }
@@ -12,7 +14,7 @@ const connected = account => account.publisherDriver === 'chrome' && Boolean(pub
   && account.bridgeAccountId === publisherProfileId(account) && account.publisherConnection?.status !== 'unconfigured';
 const eligible = account => account.enabled && !account.archived && connected(account);
 const emptyState = account => ({ ...LOGIN_MONITOR_SCHEDULE, targetKey: targetKey(account), lastDailyKey: null,
-  status: 'unchecked', checkedAt: null, error: null, outage: null });
+  status: 'unchecked', checkedAt: null, error: null, outage: null, checkAttempts: 0, nextCheckAt: null, checkFailure: null });
 const safeName = account => String(account.name || account.handle || '小红书账号').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 120);
 
 // Browser work and notification delivery never run while holding a store transaction.
@@ -23,6 +25,7 @@ export function createLoginMonitor({ store, checkAccount, notifier, clock = () =
   const stateFor = account => {
     if (!account.loginMonitor || account.loginMonitor.targetKey !== targetKey(account)) account.loginMonitor = emptyState(account);
     Object.assign(account.loginMonitor, LOGIN_MONITOR_SCHEDULE);
+    if (account.loginMonitor.status === 'failed' && !account.loginMonitor.nextCheckAt) account.loginMonitor.nextCheckAt = new Date(dateNow().getTime() + checkRetryDelays[0]).toISOString();
     return account.loginMonitor;
   };
   const configured = () => { try { return notifier?.publicStatus?.().configured === true; } catch { return false; } };
@@ -33,35 +36,38 @@ export function createLoginMonitor({ store, checkAccount, notifier, clock = () =
         if (!account.loginMonitor && !connected(account)) continue;
         const monitor = stateFor(account);
         if (['queued', 'checking'].includes(monitor.status)) Object.assign(monitor, { lastDailyKey: null, status: 'failed', error: '服务重启，将补查当天登录状态' });
-        if (monitor.outage?.notification?.status === 'sending') Object.assign(monitor.outage.notification, {
+        for (const incident of [monitor.outage, monitor.checkFailure]) if (incident?.notification?.status === 'sending') Object.assign(incident.notification, {
           status: 'pending', nextAttemptAt: new Date(at.getTime() + retryDelays[0]).toISOString(), error: '提醒发送结果未确认，稍后核对重试'
         });
       }
     });
   }
+  const incidentFor = monitor => offline(monitor?.status) ? monitor.outage : monitor?.status === 'failed' ? monitor.checkFailure : null;
   function pumpDelivery(accountId, date) {
     if (closing || sending.has(accountId) || !configured()) return;
     const account = store.rootState.accounts.find(item => item.id === accountId), monitor = account?.loginMonitor;
-    const notification = monitor?.outage?.notification;
-    if (!account || !monitor || !eligible(account) || monitor.targetKey !== targetKey(account) || !offline(monitor.status)
+    const notification = incidentFor(monitor)?.notification;
+    if (!account || !monitor || !eligible(account) || monitor.targetKey !== targetKey(account) || !incidentFor(monitor)
       || !notification || notification.status !== 'pending' || notification.nextAttemptAt && new Date(notification.nextAttemptAt) > date) return;
     sending.add(accountId);
     const task = deliveries.catch(() => {}).then(() => store.run(accountId, async () => {
       if (!configured()) return;
       const request = await store.mutate(s => {
-        const account = s.accounts.find(item => item.id === accountId), monitor = account?.loginMonitor, outage = monitor?.outage;
-        if (!account || !monitor || !eligible(account) || monitor.targetKey !== targetKey(account) || !offline(monitor.status)
+        const account = s.accounts.find(item => item.id === accountId), monitor = account?.loginMonitor, outage = incidentFor(monitor);
+        if (!account || !monitor || !eligible(account) || monitor.targetKey !== targetKey(account) || !incidentFor(monitor)
           || !outage || outage.notification.status !== 'pending' || outage.notification.nextAttemptAt && new Date(outage.notification.nextAttemptAt) > date) return null;
         Object.assign(outage.notification, { status: 'sending', attempts: (outage.notification.attempts || 0) + 1, attemptedAt: date.toISOString(), error: null });
         const time = new Intl.DateTimeFormat('zh-CN', { timeZone: LOGIN_MONITOR_SCHEDULE.timezone, dateStyle: 'short', timeStyle: 'short', hourCycle: 'h23' }).format(new Date(outage.checkedAt));
-        return { id: outage.id, target: monitor.targetKey, text: `薯航｜小红书账号需要重新登录\n账号：${safeName(account)}\n状态：${outage.status === 'mismatch' ? '当前浏览器登录了其他账号' : '登录已失效'}\n检查时间：${time}（北京时间）\n请在运行薯航的电脑打开 https://creator.xiaohongshu.com/ 登录此账号。` };
+        return { id: outage.id, target: monitor.targetKey, text: outage.status === 'check_failed'
+          ? `薯航｜小红书登录检查未完成\n账号：${safeName(account)}\n已连续重试仍无法连接浏览器，尚不能判断账号是否掉线。\n检查时间：${time}（北京时间）\n请检查运行薯航的电脑与浏览器连接；恢复后会继续检查。`
+          : `薯航｜小红书账号需要重新登录\n账号：${safeName(account)}\n状态：${outage.status === 'mismatch' ? '当前浏览器登录了其他账号' : '登录已失效'}\n检查时间：${time}（北京时间）\n请在薯航账号菜单打开此账号的登录窗口，前往 https://creator.xiaohongshu.com/ 重新登录。` };
       });
       if (!request) return;
       let result;
       try { result = await notifier.send(request.text, { idempotencyKey: request.id }); }
       catch { result = { sent: false, reason: 'failed' }; }
       await store.mutate(s => {
-        const account = s.accounts.find(item => item.id === accountId), monitor = account?.loginMonitor, outage = monitor?.outage;
+        const account = s.accounts.find(item => item.id === accountId), monitor = account?.loginMonitor, outage = incidentFor(monitor);
         if (!outage || outage.id !== request.id || monitor.targetKey !== request.target) return;
         const notification = outage.notification;
         if (result?.sent === true) Object.assign(notification, { status: 'delivered', deliveredAt: date.toISOString(), nextAttemptAt: null, error: null });
@@ -78,7 +84,7 @@ export function createLoginMonitor({ store, checkAccount, notifier, clock = () =
       const active = await store.mutate(s => {
         const account = s.accounts.find(item => item.id === accountId), monitor = account?.loginMonitor;
         if (!account || !eligible(account) || targetKey(account) !== target || monitor?.lastDailyKey !== key) return false;
-        monitor.status = 'checking'; return true;
+        monitor.status = 'checking'; monitor.checkAttempts = (monitor.checkAttempts || 0) + 1; return true;
       });
       if (!active) return;
       let result;
@@ -91,6 +97,13 @@ export function createLoginMonitor({ store, checkAccount, notifier, clock = () =
         if (status === 'ready' && result.accountId !== publisherProfileId(account)) status = 'mismatch';
         const confirmed = status === 'ready' || offline(status);
         Object.assign(monitor, { status: confirmed ? status : 'failed', checkedAt: date.toISOString(), error: confirmed ? null : '未能完成登录检查，请检查浏览器连接' });
+        if (confirmed) { monitor.nextCheckAt = null; monitor.checkFailure = null; }
+        else {
+          monitor.nextCheckAt = new Date(date.getTime() + checkRetryDelays[Math.min(monitor.checkAttempts - 1, checkRetryDelays.length - 1)]).toISOString();
+          if (monitor.checkAttempts >= 3 && !monitor.checkFailure) monitor.checkFailure = {
+            id: randomUUID(), status: 'check_failed', checkedAt: date.toISOString(), notification: { status: 'pending', attempts: 0, deliveredAt: null, nextAttemptAt: null, error: null }
+          };
+        }
         if (status === 'ready') monitor.outage = null;
         else if (offline(status) && !monitor.outage) monitor.outage = {
           id: randomUUID(), status, checkedAt: date.toISOString(), notification: { status: 'pending', attempts: 0, deliveredAt: null, nextAttemptAt: null, error: null }
@@ -107,14 +120,15 @@ export function createLoginMonitor({ store, checkAccount, notifier, clock = () =
     const parts = dateParts(date, LOGIN_MONITOR_SCHEDULE.timezone), key = dailyKey(date, LOGIN_MONITOR_SCHEDULE.timezone);
     const due = `${parts.hour}:${parts.minute}` >= LOGIN_MONITOR_SCHEDULE.time;
     const candidates = due ? store.rootState.accounts.filter(account => eligible(account) && !checking.has(account.id)
-      && (!account.loginMonitor || account.loginMonitor.targetKey !== targetKey(account) || account.loginMonitor.lastDailyKey !== key)).map(account => account.id) : [];
+      && (!account.loginMonitor || account.loginMonitor.targetKey !== targetKey(account) || account.loginMonitor.lastDailyKey !== key || retryDue(account.loginMonitor, date))).map(account => account.id) : [];
     const claims = candidates.length ? await store.mutate(s => {
       const claimed = [];
       for (const account of s.accounts.filter(account => candidates.includes(account.id))) {
         if (!eligible(account) || checking.has(account.id)) continue;
         const monitor = stateFor(account);
-        if (due && monitor.lastDailyKey !== key) {
-          Object.assign(monitor, { lastDailyKey: key, status: 'queued', error: null });
+        if (due && (monitor.lastDailyKey !== key || retryDue(monitor, date))) {
+          if (monitor.lastDailyKey !== key) monitor.checkAttempts = 0;
+          Object.assign(monitor, { lastDailyKey: key, status: 'queued', error: null, nextCheckAt: null });
           claimed.push({ accountId: account.id, target: monitor.targetKey });
         }
       }

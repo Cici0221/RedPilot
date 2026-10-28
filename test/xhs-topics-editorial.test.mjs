@@ -106,7 +106,7 @@ test('topic matches retain topic provenance and do not imply zero, NaN or real-t
 
 test('a topic shared with a ranked board uses only the ranked appearance for heat comparison',()=>{
   const boards=normalizeBoards([board(),{platformId:'weibo',sourceUrl:'https://s.weibo.com/top/summary',status:'ready',fetchedAt,items:[{title:'手机通信技巧',url:'https://s.weibo.com/weibo?q=phone',rank:8}]}]);
-  const result=rankedTrends(state(boards),account)[0];
+  const result=rankedTrends(state(boards),account,{asOf:fetchedAt})[0];
   assert.equal(result.bestRank,8);assert.equal(result.platformCount,1);assert.equal(result.appearances.length,2);
   assert.equal(result.sources.find(item=>item.platformId==='xiaohongshu').kind,'topics');
   assert.equal(result.sources.find(item=>item.platformId==='weibo').rank,8);
