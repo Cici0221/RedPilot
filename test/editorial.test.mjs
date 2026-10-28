@@ -192,6 +192,53 @@ test('failed daily refreshes retry on bounded backoff and preserve the daily key
   await f.tick(new Date('2030-01-04T01:00:00Z'));await trendFinished(f,6);assert.equal(reads,5);
 });
 
+test('exhausted browser failures recover every fifteen minutes once across accounts without retrying login failures', async t => {
+  const requested = [], dueAt = '2030-01-02T04:00:00.000Z';
+  const original = completeBoards(), browserBoard = original.find(board => board.platformId === 'weibo');
+  const disconnected = { ...browserBoard, status: 'unavailable', reasonCode: 'browser_unavailable', items: [] };
+  const f = await fixture(t, { trendReader: async request => {
+    requested.push(request.platformIds);
+    return requested.length === 1 ? [disconnected] : [{ ...browserBoard, fetchedAt: '2030-01-02T04:15:01.000Z' }];
+  } });
+  const second = await addAccount(f, '共享热榜分号');
+  await onlyTrendAutomation(f);
+  await f.store.mutate(s => {
+    s.trendBoards = original.map(board => board.platformId === 'weibo' ? disconnected : board.platformId === 'zhihu'
+      ? { ...board, status: 'needs_login', reasonCode: 'needs_login', items: [] } : board);
+    Object.assign(s.trendSchedule, { enabled: false, lastDailyKey: '2030-01-02', retryCount: 3, nextRetryAt: null,
+      retryPlatformIds: ['weibo', 'zhihu'], browserRecoveryAt: dueAt });
+  });
+  const initial = await state(f), unchanged = initial.trendBoards.filter(board => board.platformId !== 'weibo');
+  await f.tick(new Date(dueAt));
+  assert.equal(requested.length, 0, 'disabled automatic updates must not start browser recovery');
+  assert.equal((await state(f)).trendRefreshJobs.length, 0);
+
+  await f.store.mutate(s => { s.trendSchedule.enabled = true; });
+  await Promise.all([f.tick(new Date(dueAt)), f.tick(new Date(dueAt))]);
+  const failed = await trendFinished(f, 1);
+  assert.deepEqual(requested, [['weibo']], 'the shared board queues one browser-only recovery for both accounts');
+  assert.equal(failed.trendRefreshJobs[0].reason, 'browser_recovery');
+  assert.equal(failed.trendSchedule.retryCount, 3, 'recovery must not reset the exhausted normal retry budget');
+  assert.equal(failed.trendSchedule.nextRetryAt, null);
+  assert.deepEqual(failed.trendBoards.filter(board => board.platformId !== 'weibo'), unchanged);
+  assert.equal((await state(f, second.id)).trendRefreshJobs[0].id, failed.trendRefreshJobs[0].id);
+  const nextDue = Date.parse(failed.trendSchedule.browserRecoveryAt);
+  assert.ok(nextDue >= Date.parse(dueAt) + 15 * 60000 && nextDue < Date.parse(dueAt) + 16 * 60000,
+    'a failed browser recovery waits another fifteen minutes');
+  await f.tick(new Date(nextDue - 1));
+  assert.equal(requested.length, 1);
+  await f.tick(new Date(nextDue + 1000));
+  const recovered = await trendFinished(f, 2);
+  assert.deepEqual(requested, [['weibo'], ['weibo']]);
+  assert.equal(recovered.trendSchedule.retryCount, 3);
+  assert.equal(recovered.trendBoards.find(board => board.platformId === 'weibo').status, 'ready');
+  assert.equal(recovered.trendBoards.find(board => board.platformId === 'weibo').stale, false);
+  assert.deepEqual(recovered.trendBoards.filter(board => board.platformId !== 'weibo'), unchanged);
+  await f.tick(new Date(nextDue + 61 * 60000));
+  assert.equal(requested.length, 2, 'login-required sources must not keep browser recovery running after recovery');
+  assert.equal((await state(f)).trendRefreshJobs.length, 2);
+});
+
 test('the 09:00 report waits for the scheduled refresh even if a manual snapshot completed moments earlier', async t => {
   let reads = 0, release; const gate = new Promise(resolve => { release = resolve; });
   const day = '2030-01-02', title = '手机双卡通信九点新榜';

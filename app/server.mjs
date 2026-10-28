@@ -398,11 +398,16 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
   const trendPromises=new Map(),queuedReports=new Set();
   function queueTrends(s,reason='manual',platformIds=null,requestedAt=now()) {
     let job=s.trendRefreshJobs.find(editorialActive);if(job)return job;
-    job={id:id(),status:'queued',reason,createdAt:now(),requestedAt,...(platformIds?{platformIds}: {})};if(reason!=='retry')s.trendSchedule.retryCount=0;s.trendRefreshJobs.unshift(job);s.trendRefreshJobs=s.trendRefreshJobs.slice(0,60);return job;
+    job={id:id(),status:'queued',reason,createdAt:now(),requestedAt,...(platformIds?{platformIds}: {})};if(!['retry','browser_recovery'].includes(reason))s.trendSchedule.retryCount=0;s.trendRefreshJobs.unshift(job);s.trendRefreshJobs=s.trendRefreshJobs.slice(0,60);return job;
   }
   const trendRetryAt=(job,retries)=>new Date(Date.parse(job.requestedAt||job.createdAt)+Math.max(0,Date.now()-Date.parse(job.startedAt||job.createdAt))+[5,20,60][retries]*60000).toISOString();
   function finishTrendSchedule(s,job){
     if(s.trendSchedule.lastJobId===job.id)Object.assign(s.trendSchedule,{status:job.status,lastCompletedAt:job.completedAt,lastError:job.error||null});
+    // Business reads trigger the local bridge's reconnect. A /health-only poll
+    // cannot reconnect a bridge whose Chrome websocket has already closed.
+    const browserFailed=s.trendBoards.some(board=>board.reasonCode==='browser_unavailable');
+    const finished=Date.parse(job.requestedAt||job.createdAt)+Math.max(0,Date.now()-Date.parse(job.startedAt||job.createdAt));
+    s.trendSchedule.browserRecoveryAt=browserFailed?new Date(finished+15*60000).toISOString():null;
   }
   function scheduleTrends(jobId) {
     if(trendPromises.has(jobId))return trendPromises.get(jobId);
@@ -769,9 +774,16 @@ export async function createApp({root=ROOT,directory=process.env.REDPILOT_DATA_D
       let dailyTrendJob=null;
       if(trend.enabled&&`${tp.hour}:${tp.minute}`>=trend.time&&trend.lastDailyKey!==trendKey){
         const job=queueTrends(s,'daily',null,date.toISOString());dailyTrendJob=job;
-        Object.assign(trend,{lastDailyKey:trendKey,lastJobId:job.id,lastAttemptAt:date.toISOString(),status:job.status,lastError:null,nextRetryAt:null});
+        Object.assign(trend,{lastDailyKey:trendKey,lastJobId:job.id,lastAttemptAt:date.toISOString(),status:job.status,lastError:null,nextRetryAt:null,browserRecoveryAt:null});
       }
-      else if(trend.lastDailyKey===trendKey&&trend.nextRetryAt&&Date.parse(trend.nextRetryAt)<=+date&&!s.trendRefreshJobs.some(editorialActive)){const retry=queueTrends(s,'retry',trend.retryPlatformIds,date.toISOString());trend.retryCount=(trend.retryCount||0)+1;trend.nextRetryAt=null;trend.lastJobId=retry.id;}
+      else if(trend.enabled&&trend.lastDailyKey===trendKey&&!s.trendRefreshJobs.some(editorialActive)){
+        if(trend.nextRetryAt&&Date.parse(trend.nextRetryAt)<=+date){const retry=queueTrends(s,'retry',trend.retryPlatformIds,date.toISOString());trend.retryCount=(trend.retryCount||0)+1;trend.nextRetryAt=null;trend.lastJobId=retry.id;}
+        else if(!trend.nextRetryAt){
+          const platformIds=s.trendBoards.filter(board=>board.reasonCode==='browser_unavailable').map(board=>board.platformId);
+          const due=Date.parse(trend.browserRecoveryAt||'')||Date.parse(trend.lastCompletedAt||trend.lastAttemptAt)+15*60000;
+          if(platformIds.length&&due<=+date){const recovery=queueTrends(s,'browser_recovery',platformIds,date.toISOString());Object.assign(trend,{lastJobId:recovery.id,lastAttemptAt:date.toISOString(),status:recovery.status,browserRecoveryAt:new Date(+date+15*60000).toISOString()});}
+        }
+      }
       for(const c of s.creators.filter(c=>c.enabled&&!c.archived)){
         const p=dateParts(date,c.timezone),key=dailyKey(date,c.timezone);
         if(`${p.hour}:${p.minute}`>=c.time&&c.lastDailyKey!==key){c.lastDailyKey=key;queueCreatorSync(s,c.id,'daily');}
