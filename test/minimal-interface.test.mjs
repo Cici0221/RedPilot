@@ -27,7 +27,7 @@ function fixture(){
     drafts:[],draftChecks:{},jobs:[],events:[],creators:[],creatorSyncs:[],analysisTasks:[],draftGenerationJobs:[],topicPool:[],discussions:[],
     capabilities:{ai:true,model:'mock-model',publisher:false,accounts:{official:{publisher:false},secondary:{publisher:false}},linkReader:true,textPublisher:false},
     trendBoards:[],trendMatches:{official:[],secondary:[]},trendRefreshJobs:[],reportJobs:[],
-    operationReports:[{id:'report-secondary',accountId:'secondary',date:'2026-10-26',status:'ready',generatedAt:'2026-10-26T01:00:00Z',metrics,plans:[],discoveries:[{id:'source-discovery',title:'可继续创作的发现',kind:'reference',detail:'用自己的产品事实解释这个场景',sources:[{kind:'reference',id:'saved-reference',title:'已收藏来源',url:'#reference/saved-reference'}]}],snapshot:{date:'2026-10-26',timezone:'Asia/Shanghai',mode:'live',asOf:'2026-10-26T01:00:00Z'}}],
+    operationReports:[{id:'report-secondary',accountId:'secondary',date:new Date(Date.now()+8*3600000).toISOString().slice(0,10),status:'ready',generatedAt:'2026-10-26T01:00:00Z',metrics,plans:[],discoveries:[{id:'source-discovery',title:'可继续创作的发现',kind:'reference',detail:'用自己的产品事实解释这个场景',sources:[{kind:'reference',id:'saved-reference',title:'已收藏来源',url:'#reference/saved-reference'}]}],snapshot:{date:'2026-10-26',timezone:'Asia/Shanghai',mode:'live',asOf:'2026-10-26T01:00:00Z'}}],
     feishuSync:{enabled:false,status:'idle',sourceUrls:[]},feishuDocuments:[],feishuJobs:[],imageJobs:[],imageProvider:{ready:false}
   };
 }
@@ -59,10 +59,10 @@ function ui(state=fixture(),{handle}={}){
   return {state,nodes,requests,context,run:code=>vm.runInContext(code,context),async submit(form){await events.submit({target:form,submitter:node(),preventDefault(){}});}};
 }
 
-test('daily workspace has useful report controls but no report settings or unrelated blank-draft entry',()=>{
+test('daily workspace hides report controls and settings and keeps creation in the studio',()=>{
   const view=ui();view.run("page='overview';workspaceId='secondary';operationsAccountId='secondary';reportDate='2026-10-26';render()");
   const html=view.nodes['#app'].innerHTML;
-  assert.match(html,/data-action="report-generate"/);assert.match(html,/id="report-date"/);assert.doesNotMatch(html,/每日 09:00|生成于|实时统计|北京时间|operation-summary/);
+  assert.equal(view.run('reportDate'),view.run('todayReportDate()'));assert.doesNotMatch(html,/data-action="report-generate"|id="report-date"/);assert.doesNotMatch(html,/每日 09:00|生成于|实时统计|北京时间|operation-summary/);
   assert.doesNotMatch(html,/data-action="report-settings"|日报设置|data-action="generate"|新建草稿/);
   assert.doesNotMatch(html,/workspace-card|local-label|本机存储/);
   assert.match(html,/data-action="logout"/);assert.match(html,/data-page="studio"/);
