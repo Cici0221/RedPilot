@@ -62,7 +62,7 @@ function ui(state=fixture(),{handle}={}){
 test('daily workspace has useful report controls but no report settings or unrelated blank-draft entry',()=>{
   const view=ui();view.run("page='overview';workspaceId='secondary';operationsAccountId='secondary';reportDate='2026-10-26';render()");
   const html=view.nodes['#app'].innerHTML;
-  assert.match(html,/data-action="report-generate"/);assert.match(html,/id="report-date"/);assert.match(html,/09:00/);assert.match(html,/北京时间/);
+  assert.match(html,/data-action="report-generate"/);assert.match(html,/id="report-date"/);assert.doesNotMatch(html,/每日 09:00|生成于|实时统计|北京时间|operation-summary/);
   assert.doesNotMatch(html,/data-action="report-settings"|日报设置|data-action="generate"|新建草稿/);
   assert.doesNotMatch(html,/workspace-card|local-label|本机存储/);
   assert.match(html,/data-action="logout"/);assert.match(html,/data-page="studio"/);
